@@ -26,9 +26,18 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
   The knock-on effects made v1 run history misleading:
 
   - `SuccessfulDisables` never incremented, so `summary.accountsDisabled` reported `0` while accounts were in fact disabled.
-  - `HasDisableBatchError` is also a batch loop exit condition, so the run stopped after the **first** batch of `BatchSize` guests. Each weekly run cleared roughly `BatchSize` guests instead of the full backlog.
+  - `HasDisableBatchError` is also a batch loop exit condition, so the run stopped at the **first batch that produced any disable**. Each weekly run therefore cleared at most one batch's worth of eligible guests, up to `BatchSize` and usually fewer, and every guest after that point in the enumeration was never evaluated.
   - The run terminated as **Failed** with an **empty** error message, because `TerminateErrorMessage` was only ever set by the separate transport level check.
   - `Generate_JSON_Report` runs after the terminate check, so no report was produced at all.
+
+  Because the error flag also exits the batch loop, v1 never worked through the
+  full population, so existing installations have most likely **accumulated a
+  backlog** of eligible guests. The first v2 run processes that entire backlog in
+  one execution and its totals will look far larger than the familiar weekly
+  figures. That is this defect being corrected, not a v2 error. Run with
+  `ReportOnly = true`, review the totals, and only then enable enforcement;
+  adjusting `DeletionThresholdDays` is not the lever. See
+  [docs/migration-v1-to-v2.md](docs/migration-v1-to-v2.md).
 
   The Delete Logic App was not affected: its check tested for `204`, which is
   correct for `DELETE /users/{id}`. The per-item success test now accepts any `2xx`

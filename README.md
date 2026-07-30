@@ -770,6 +770,7 @@ Short version:
 - Everything previously hardcoded in the workflow JSON is now a deployment parameter. The one rename is `Threshold` to `InactivityThresholdDays`.
 - `ReportOnly` is reset to `true` on redeploy unless you pass `--report-only false`. That is deliberate: validate the new marking conditions before letting them act.
 - ⚠️ **v1 misclassified every successful disable as an error.** Graph returns `204` for `PATCH /users/{id}` and v1 checked for `200`, so v1 runs with `ReportOnly = false` reported `accountsDisabled: 0`, terminated as Failed with an empty error message, produced no report, and stopped after the first batch. **Accounts were still disabled correctly** - only the classification was wrong. Details and what to do about your v1 history are in the migration note.
+- ⚠️ **Because v1 stopped after the first batch, you probably have a backlog.** The first v2 run processes **the entire backlog in one execution**, so the totals will likely be many times your familiar weekly numbers. That is the v1 bug being corrected, not a v2 error. Run with `ReportOnly = true`, review the totals, and only then enable enforcement. Adjusting `DeletionThresholdDays` is **not** the lever; reviewing the report is.
 
 ---
 
