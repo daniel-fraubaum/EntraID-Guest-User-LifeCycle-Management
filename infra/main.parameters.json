@@ -20,9 +20,6 @@
     "reportOnly": {
       "value": true
     },
-    "excludeFlagValue": {
-      "value": "ExcludeFromLCM"
-    },
     "batchSize": {
       "value": 20
     },
