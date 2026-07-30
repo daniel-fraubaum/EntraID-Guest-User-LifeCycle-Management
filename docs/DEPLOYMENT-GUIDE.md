@@ -1,4 +1,16 @@
-# Deployment Guide
+# Deployment Guide (portal walkthrough — superseded)
+
+> **⚠️ Superseded by [deployment.md](deployment.md).**
+>
+> This guide describes the original manual portal flow, which imported
+> `Logic-EntraIDGuestLCM-*.json` from the repository root and ran a per-workflow
+> `*_Permissions.sh` script. Those files no longer exist: the workflow definitions
+> now live in `workflows/`, and `infra/deploy.sh` / `infra/deploy.ps1` deploy both
+> Logic Apps and grant the Graph app roles in one idempotent run.
+>
+> Kept for reference — the conceptual steps, dynamic group rules and validation
+> advice still apply. For anything file- or command-specific, follow
+> [deployment.md](deployment.md) instead.
 
 This guide walks through the complete deployment of both Logic Apps, from prerequisites to verification. Follow the steps in order.
 

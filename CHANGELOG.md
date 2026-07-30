@@ -4,6 +4,32 @@ All notable changes to this project will be documented in this file.
 
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
+## [Unreleased]
+
+### Added
+
+- `workflows/` — both workflow definitions, extracted from the ARM wrappers and parameterized.
+- `infra/main.bicep` + `infra/modules/logic-app-workflow.bicep` — deploy both Consumption Logic Apps with system-assigned managed identities, definitions embedded from `workflows/` at build time.
+- `infra/deploy.sh` and `infra/deploy.ps1` — create the resource group, deploy the Bicep, and assign the Microsoft Graph app roles to both managed identities. Idempotent, with 5 × 15 s retries around every directory lookup and role assignment, and no API call made with an empty id. Support `--skip-infra`, `--skip-permissions` and a `--report-only true|false` switch that updates only that parameter.
+- `infra/main.parameters.json` — sample parameter file.
+- `docs/deployment.md` — prerequisites, quickstart for both operating systems, mandatory first-run-in-report-only guidance, parameter reference and troubleshooting table.
+- Workflow parameters `NewAccountGraceDays` and `ExcludeFlagValue`, declared and deployed but not yet consumed by any workflow expression.
+
+### Changed
+
+- Mark workflow parameter `Threshold` renamed to `InactivityThresholdDays`.
+- `ReportOnly` now defaults to `true` in both workflow definitions.
+- README and `docs/PERMISSIONS-REFERENCE.md` state that reading `signInActivity` requires both the `AuditLog.Read.All` application permission and a Microsoft Entra ID P1/P2 license.
+- `docs/DEPLOYMENT-GUIDE.md` marked as superseded by `docs/deployment.md`.
+
+### Removed
+
+- The two root-level ARM templates, replaced by `workflows/` + `infra/`.
+- The two per-workflow `*_Permissions.sh` scripts, replaced by the role assignment in `infra/deploy.sh` / `infra/deploy.ps1`.
+
+No workflow logic changed: every action, condition, expression and `runAfter` edge
+is carried over unchanged apart from the parameter rename above.
+
 ## [1.0.0] - 2025
 
 ### Added

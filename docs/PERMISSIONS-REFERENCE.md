@@ -58,9 +58,17 @@ Permissions are assigned using the Azure CLI scripts provided in the repository.
 3. Look up the `appRoleId` for each permission string.
 4. Create `appRoleAssignment` entries via the Graph API.
 
+> **⚠️ The two per-workflow permission scripts below have been removed.**
+> `infra/deploy.sh` / `infra/deploy.ps1` now assign the app roles to **both**
+> managed identities in one idempotent, retrying run. The role lists below are
+> retained as a record of what the original scripts granted; the deploy scripts
+> grant `AuditLog.Read.All`, `User.ReadWrite.All` and `GroupMember.Read.All` by
+> default, overridable with `--roles` / `-Roles`. See
+> [deployment.md](deployment.md#microsoft-graph-application-permissions).
+
 ### Script: Mark Logic App Permissions
 
-**File:** `Logic-EntraIDGuestLCM-MarkGuestsEligibleforRemoval_Azure_CLI_Permissions.sh`
+**File:** `Logic-EntraIDGuestLCM-MarkGuestsEligibleforRemoval_Azure_CLI_Permissions.sh` *(removed)*
 
 ```bash
 graphPermissions=(
@@ -73,7 +81,7 @@ graphPermissions=(
 
 ### Script: Delete Logic App Permissions
 
-**File:** `Logic-EntraIDGuestLCM-DeleteGuestUsersAfterGracePeriod_AzureCLIPermissions.sh`
+**File:** `Logic-EntraIDGuestLCM-DeleteGuestUsersAfterGracePeriod_AzureCLIPermissions.sh` *(removed)*
 
 ```bash
 graphPermissions=(

@@ -1,0 +1,38 @@
+{
+  "$schema": "https://schema.management.azure.com/schemas/2019-04-01/deploymentParameters.json#",
+  "contentVersion": "1.0.0.0",
+  "parameters": {
+    "allGuestsGroupId": {
+      "value": "00000000-0000-0000-0000-000000000000"
+    },
+    "eligibleForRemovalGroupId": {
+      "value": "00000000-0000-0000-0000-000000000000"
+    },
+    "inactivityThresholdDays": {
+      "value": 180
+    },
+    "deletionThresholdDays": {
+      "value": 30
+    },
+    "newAccountGraceDays": {
+      "value": 30
+    },
+    "reportOnly": {
+      "value": true
+    },
+    "excludeFlagValue": {
+      "value": "ExcludeFromLCM"
+    },
+    "batchSize": {
+      "value": 20
+    },
+    "workflowState": {
+      "value": "Enabled"
+    },
+    "tags": {
+      "value": {
+        "solution": "EntraIDGuestLCM"
+      }
+    }
+  }
+}
