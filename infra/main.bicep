@@ -1,6 +1,6 @@
 metadata description = 'Entra ID guest user lifecycle management: two Consumption Logic Apps (Mark + Delete) with system-assigned managed identities.'
 
-// Graph app roles are NOT granted here — role assignment on the Microsoft
+// Graph app roles are NOT granted here - role assignment on the Microsoft
 // Graph service principal is a directory operation, not an ARM one. Run
 // deploy.sh / deploy.ps1, which deploy this template and then assign the
 // roles to both managed identities.
@@ -14,12 +14,12 @@ param markWorkflowName string = 'Logic-EntraIDGuestLCM-MarkGuestsEligibleforRemo
 @description('Name of the Logic App that deletes marked guests after the grace period.')
 param deleteWorkflowName string = 'Logic-EntraIDGuestLCM-DeleteGuestUsersAfterGracePeriod'
 
-@description('Object ID of the "All Guests" dynamic group — the member source for the Mark workflow.')
+@description('Object ID of the "All Guests" dynamic group - the member source for the Mark workflow.')
 @minLength(36)
 @maxLength(36)
 param allGuestsGroupId string
 
-@description('Object ID of the "Eligible For Removal" dynamic group — the member source for the Delete workflow.')
+@description('Object ID of the "Eligible For Removal" dynamic group - the member source for the Delete workflow.')
 @minLength(36)
 @maxLength(36)
 param eligibleForRemovalGroupId string
@@ -34,7 +34,7 @@ param inactivityThresholdDays int = 180
 @maxValue(3650)
 param deletionThresholdDays int = 30
 
-@description('Grace period for guests that have never signed in: one is only marked once createdDateTime is older than this. Applied in addition to inactivityThresholdDays, so it is the binding constraint only when it is the larger of the two — which is what protects freshly invited guests if inactivityThresholdDays is lowered.')
+@description('Grace period for guests that have never signed in: one is only marked once createdDateTime is older than this. Applied in addition to inactivityThresholdDays, so it is the binding constraint only when it is the larger of the two - which is what protects freshly invited guests if inactivityThresholdDays is lowered.')
 @minValue(0)
 @maxValue(3650)
 param newAccountGraceDays int = 30
@@ -132,10 +132,10 @@ output markWorkflowId string = markWorkflow.outputs.resourceId
 @description('Resource ID of the Delete workflow.')
 output deleteWorkflowId string = deleteWorkflow.outputs.resourceId
 
-@description('Managed identity object ID of the Mark workflow — needs the Graph app roles.')
+@description('Managed identity object ID of the Mark workflow - needs the Graph app roles.')
 output markPrincipalId string = markWorkflow.outputs.principalId
 
-@description('Managed identity object ID of the Delete workflow — needs the Graph app roles.')
+@description('Managed identity object ID of the Delete workflow - needs the Graph app roles.')
 output deletePrincipalId string = deleteWorkflow.outputs.principalId
 
 @description('Effective dry-run state of both workflows.')

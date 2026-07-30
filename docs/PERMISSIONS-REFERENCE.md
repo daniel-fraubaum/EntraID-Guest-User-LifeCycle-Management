@@ -8,7 +8,7 @@ Both Logic Apps use **System-assigned Managed Identities** to authenticate again
 
 ---
 
-## Logic App 1 — Mark Guests Eligible for Removal
+## Logic App 1 - Mark Guests Eligible for Removal
 
 ### Required Permissions
 
@@ -29,7 +29,7 @@ Both Logic Apps use **System-assigned Managed Identities** to authenticate again
 
 ---
 
-## Logic App 2 — Delete Guests After Grace Period
+## Logic App 2 - Delete Guests After Grace Period
 
 ### Required Permissions
 
@@ -116,7 +116,7 @@ az rest --method GET \
 
 ## Least Privilege Considerations
 
-- Both Logic Apps follow the principle of least privilege — only requesting the minimum set of permissions required for their specific function.
+- Both Logic Apps follow the principle of least privilege - only requesting the minimum set of permissions required for their specific function.
 - The two Logic Apps have **separate Managed Identities** with **independent permission sets**, ensuring that the Mark Logic App cannot delete users and the Delete Logic App cannot disable accounts.
 - `AuditLog.Read.All` is only granted to Logic App 1 because only it needs to read `signInActivity`.
 - `User.EnableDisableAccount.All` is only granted to Logic App 1.

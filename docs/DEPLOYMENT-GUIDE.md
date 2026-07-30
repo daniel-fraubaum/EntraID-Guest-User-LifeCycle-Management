@@ -1,4 +1,4 @@
-# Deployment Guide (portal walkthrough — superseded)
+# Deployment Guide (portal walkthrough - superseded)
 
 > **⚠️ Superseded by [deployment.md](deployment.md).**
 >
@@ -8,7 +8,7 @@
 > now live in `workflows/`, and `infra/deploy.sh` / `infra/deploy.ps1` deploy both
 > Logic Apps and grant the Graph app roles in one idempotent run.
 >
-> Kept for reference — the conceptual steps, dynamic group rules and validation
+> Kept for reference - the conceptual steps, dynamic group rules and validation
 > advice still apply. For anything file- or command-specific, follow
 > [deployment.md](deployment.md) instead.
 
@@ -17,12 +17,12 @@ This guide walks through the complete deployment of both Logic Apps, from prereq
 ## Table of Contents
 
 - [Prerequisites Checklist](#prerequisites-checklist)
-- [Step 1 — Create Dynamic Security Groups](#step-1--create-dynamic-security-groups)
-- [Step 2 — Deploy Logic App 1 (Mark Guests)](#step-2--deploy-logic-app-1-mark-guests)
-- [Step 3 — Deploy Logic App 2 (Delete Guests)](#step-3--deploy-logic-app-2-delete-guests)
-- [Step 4 — Grant Microsoft Graph Permissions](#step-4--grant-microsoft-graph-permissions)
-- [Step 5 — Validate with Report-Only Mode](#step-5--validate-with-report-only-mode)
-- [Step 6 — Enable Production Mode](#step-6--enable-production-mode)
+- [Step 1 - Create Dynamic Security Groups](#step-1--create-dynamic-security-groups)
+- [Step 2 - Deploy Logic App 1 (Mark Guests)](#step-2--deploy-logic-app-1-mark-guests)
+- [Step 3 - Deploy Logic App 2 (Delete Guests)](#step-3--deploy-logic-app-2-delete-guests)
+- [Step 4 - Grant Microsoft Graph Permissions](#step-4--grant-microsoft-graph-permissions)
+- [Step 5 - Validate with Report-Only Mode](#step-5--validate-with-report-only-mode)
+- [Step 6 - Enable Production Mode](#step-6--enable-production-mode)
 - [Post-Deployment Checklist](#post-deployment-checklist)
 
 ---
@@ -35,14 +35,14 @@ Before starting, verify the following:
 - [ ] Entra ID tenant with guest users to manage
 - [ ] Global Administrator or Privileged Role Administrator role (required to grant Graph API app roles)
 - [ ] Azure CLI (`az`) installed locally or access to Azure Cloud Shell
-- [ ] `jq` installed (used by the permission scripts) — pre-installed in Azure Cloud Shell
+- [ ] `jq` installed (used by the permission scripts) - pre-installed in Azure Cloud Shell
 - [ ] Two free extension attributes available in your tenant (`extensionAttribute14` and `extensionAttribute15`)
 
 > **Warning:** Verify that `extensionAttribute14` and `extensionAttribute15` are not already in use by other applications (e.g., Exchange, HR sync, or other automation). Overwriting existing values can cause unintended side effects.
 
 ---
 
-## Step 1 — Create Dynamic Security Groups
+## Step 1 - Create Dynamic Security Groups
 
 Create two dynamic security groups in the [Microsoft Entra admin center](https://entra.microsoft.com):
 
@@ -77,13 +77,13 @@ Create two dynamic security groups in the [Microsoft Entra admin center](https:/
 After creating both groups:
 
 1. Wait for the initial membership evaluation to complete (can take up to several minutes).
-2. Note the **Object ID** of each group — you will need these during Logic App deployment.
+2. Note the **Object ID** of each group - you will need these during Logic App deployment.
 
 > **Tip:** To permanently exclude a guest user from lifecycle management (e.g., VIPs, service accounts), set `extensionAttribute15 = "ExcludeFromLCM"` on that user. They will be automatically excluded from the `AllGuests` group.
 
 ---
 
-## Step 2 — Deploy Logic App 1 (Mark Guests)
+## Step 2 - Deploy Logic App 1 (Mark Guests)
 
 1. Open the [Azure Portal](https://portal.azure.com).
 2. Navigate to **Deploy a custom template** (search for "Deploy a custom template" in the portal search bar).
@@ -104,11 +104,11 @@ After creating both groups:
 8. Click **Review + create**, then **Create**.
 9. After deployment succeeds, navigate to the Logic App resource.
 10. Go to **Identity** → **System assigned** → set **Status** to **On** → **Save**.
-11. Copy the **Object (principal) ID** of the Managed Identity — you will need this for the permission script.
+11. Copy the **Object (principal) ID** of the Managed Identity - you will need this for the permission script.
 
 ---
 
-## Step 3 — Deploy Logic App 2 (Delete Guests)
+## Step 3 - Deploy Logic App 2 (Delete Guests)
 
 Repeat the same deployment process using the second template:
 
@@ -129,7 +129,7 @@ Repeat the same deployment process using the second template:
 
 ---
 
-## Step 4 — Grant Microsoft Graph Permissions
+## Step 4 - Grant Microsoft Graph Permissions
 
 Each Logic App needs specific Microsoft Graph API application permissions. These are granted via the provided shell scripts.
 
@@ -175,7 +175,7 @@ After running each script, verify in the Entra admin center:
 
 ---
 
-## Step 5 — Validate with Report-Only Mode
+## Step 5 - Validate with Report-Only Mode
 
 Before enabling production mode, validate both Logic Apps in dry-run mode:
 
@@ -186,8 +186,8 @@ Before enabling production mode, validate both Logic Apps in dry-run mode:
 3. Open the run from **Run history**.
 4. Inspect the final action (`Generate_JSON_Report`) output:
    - Verify `summary.reportOnlyMode` is `true`.
-   - Check `summary.totalAffectedUsers` — are the numbers plausible?
-   - Review the `affectedUsers` array — do the listed users match your expectations?
+   - Check `summary.totalAffectedUsers` - are the numbers plausible?
+   - Review the `affectedUsers` array - do the listed users match your expectations?
 5. Verify the `AllGuests` group contains the users you expect.
 
 ### Validate Logic App 2
@@ -195,12 +195,12 @@ Before enabling production mode, validate both Logic Apps in dry-run mode:
 1. Manually trigger the Delete Logic App.
 2. Inspect the `Generate_Final_Report` output:
    - Verify `summary.reportOnlyMode` is `true`.
-   - Check `summary.totalMarkedUsersFound` — should be `0` if no users have been marked yet.
+   - Check `summary.totalMarkedUsersFound` - should be `0` if no users have been marked yet.
 3. This is expected to show no users for deletion until Logic App 1 has actually marked users (in production mode).
 
 ---
 
-## Step 6 — Enable Production Mode
+## Step 6 - Enable Production Mode
 
 Once you are satisfied with the report-only results:
 

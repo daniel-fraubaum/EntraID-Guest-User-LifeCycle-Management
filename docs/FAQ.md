@@ -4,7 +4,7 @@
 
 ### What is this solution?
 
-This solution automates the lifecycle management of guest (B2B) users in Microsoft Entra ID. It identifies inactive guest users, disables and marks them for removal, and — after a configurable grace period — deletes them. It uses two Azure Logic Apps and requires no premium Entra ID licenses.
+This solution automates the lifecycle management of guest (B2B) users in Microsoft Entra ID. It identifies inactive guest users, disables and marks them for removal, and - after a configurable grace period - deletes them. It uses two Azure Logic Apps and requires no premium Entra ID licenses.
 
 ### Why not use Entra ID Access Reviews or Identity Governance?
 
@@ -24,7 +24,7 @@ The solution is designed specifically for guest users (`userType = "Guest"`). It
 
 ### Which Azure region should I deploy to?
 
-The ARM templates default to `westeurope`. You can change this to any region that supports Azure Logic Apps (Consumption). The region does not affect which Entra ID tenant is managed — that is determined by the Managed Identity.
+The ARM templates default to `westeurope`. You can change this to any region that supports Azure Logic Apps (Consumption). The region does not affect which Entra ID tenant is managed - that is determined by the Managed Identity.
 
 ### Can I deploy both Logic Apps to the same Resource Group?
 
@@ -45,16 +45,16 @@ Yes. The `LogicApp-Name` parameter in each template can be customized to any val
 ### What is a good value for `Threshold`?
 
 The default is `180` days (6 months). This means guest users who have not signed in for 180 days will be flagged. Adjust based on your organization's guest user policies:
-- **90 days** — aggressive, suitable for short-lived collaboration.
-- **180 days** — balanced default for most organizations.
-- **365 days** — conservative, allows for seasonal or annual collaborators.
+- **90 days** - aggressive, suitable for short-lived collaboration.
+- **180 days** - balanced default for most organizations.
+- **365 days** - conservative, allows for seasonal or annual collaborators.
 
 ### What is a good value for `DeletionThresholdDays`?
 
 The default is `30` days. This is the grace period between marking a user and deleting them. During this time, the user is disabled but not yet deleted, giving administrators time to review and exclude any false positives. Adjust based on your review cadence:
-- **14 days** — fast cleanup, requires frequent review.
-- **30 days** — balanced default.
-- **60–90 days** — conservative, allows extended review time.
+- **14 days** - fast cleanup, requires frequent review.
+- **30 days** - balanced default.
+- **60-90 days** - conservative, allows extended review time.
 
 ### What does `ReportOnly` do?
 
@@ -63,9 +63,9 @@ When set to `true` (the default), the Logic Apps evaluate users and generate a J
 ### What `BatchSize` should I use?
 
 The default is `20`, which is a safe starting point. The maximum is `100` (limited by the Microsoft Graph batch API). Considerations:
-- **Smaller batches (5–10):** Safer for initial testing; lower risk of rate limiting.
+- **Smaller batches (5-10):** Safer for initial testing; lower risk of rate limiting.
 - **Default (20):** Good balance between throughput and safety.
-- **Larger batches (50–100):** Higher throughput but increased risk of hitting Graph API rate limits (HTTP 429).
+- **Larger batches (50-100):** Higher throughput but increased risk of hitting Graph API rate limits (HTTP 429).
 
 ---
 
@@ -113,7 +113,7 @@ The run is marked as "Failed" in the run history with a detailed error message. 
 - Permission errors (HTTP 403)
 - Invalid group ID (HTTP 404)
 
-Failed runs do not leave the system in an inconsistent state — partial progress is captured in the report, and the next scheduled run will re-evaluate all users.
+Failed runs do not leave the system in an inconsistent state - partial progress is captured in the report, and the next scheduled run will re-evaluate all users.
 
 ### Can I run the Logic Apps manually?
 
@@ -140,10 +140,10 @@ Restore-MgDirectoryDeletedItem -DirectoryObjectId "<user-object-id>"
 
 ## Troubleshooting
 
-### No users are being marked — the report shows 0 affected users
+### No users are being marked - the report shows 0 affected users
 
 1. **Check group membership:** Verify that `GRP_SEC_GuestUserLCM_AllGuests` contains members. Wait for dynamic group evaluation to complete.
-2. **Verify permissions:** Ensure `AuditLog.Read.All` is granted — without it, `signInActivity` will be `null` and users won't be detected as inactive.
+2. **Verify permissions:** Ensure `AuditLog.Read.All` is granted - without it, `signInActivity` will be `null` and users won't be detected as inactive.
 3. **Check threshold:** If `Threshold` is set to 365 days, only users inactive for over a year will be flagged. Try a shorter threshold for testing.
 4. **Verify user state:** The Logic App skips users where `accountEnabled = false`. If users are already disabled, they won't be processed.
 
@@ -169,5 +169,5 @@ Restore-MgDirectoryDeletedItem -DirectoryObjectId "<user-object-id>"
 ### Extension attributes are not being written
 
 1. Verify `User.ReadWrite.All` is granted.
-2. Check that `ReportOnly` is set to `false` — in report-only mode, no attributes are written.
+2. Check that `ReportOnly` is set to `false` - in report-only mode, no attributes are written.
 3. Inspect the Logic App run details for the `Execute_DisableBatch` action to see if it succeeded.

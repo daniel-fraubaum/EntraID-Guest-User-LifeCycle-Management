@@ -1,6 +1,6 @@
 # 🚀 Entra ID Guest User Lifecycle Management (Azure Logic Apps)
 
-Automate the lifecycle of Entra ID guest users — without expensive licenses. This solution uses two Azure Logic Apps to:
+Automate the lifecycle of Entra ID guest users - without expensive licenses. This solution uses two Azure Logic Apps to:
 - 💤 Detect and disable inactive guest users, tagging them as eligible for removal
 - 🧹 Delete tagged guest users after a configurable grace period
 
@@ -22,7 +22,7 @@ Includes report-only mode, dynamic group examples, and template-driven deploymen
 ## 📁 Repository Layout
 
 ```
-workflows/                                 Workflow definitions — source of truth for behaviour
+workflows/                                 Workflow definitions - source of truth for behaviour
   mark-guests-eligible-for-removal.json
   delete-guests-after-grace-period.json
 infra/
@@ -31,6 +31,8 @@ infra/
   main.parameters.json                     Sample parameter file
   deploy.sh / deploy.ps1                   Deploy + grant Graph app roles, idempotent
 docs/deployment.md                         Deployment guide, first-run guidance, troubleshooting
+docs/migration-v1-to-v2.md                 Upgrade notes for existing v1 installations
+scripts/validate-workflows.py              Static validation of the workflow definitions
 scripts/learn-search.py                    Query official Microsoft Learn docs from the CLI
 ```
 
@@ -38,32 +40,121 @@ scripts/learn-search.py                    Query official Microsoft Learn docs f
 
 ## 🧩 Architecture
 
-This solution consists of two independent Logic Apps:
+Two independent Consumption Logic Apps, each with its own system-assigned managed
+identity, each fed by its own dynamic security group. They are deliberately
+separate: the Mark app can disable but never delete, the Delete app can delete but
+never disable, and the handoff between them is a pair of extension attributes on
+the user object rather than shared state.
 
-1) Logic-EntraIDGuestLCM-MarkGuestsEligibleforRemoval
-- ⏱️ Schedule: Weekly (e.g., Sunday, 01:00)
-- 🔎 Evaluates guests’ sign-in activity via Microsoft Graph
-- ✅ Marks user if any one of three conditions holds:
-  - **Inactivity** — last sign-in older than `InactivityThresholdDays`
-  - **Never signed in** — no sign-in activity *and* created longer ago than **both** `InactivityThresholdDays` and `NewAccountGraceDays`
-  - **Expiry** — `extensionAttribute13` holds a date in the past (approved access period elapsed; written by VouchGate)
-- 🏷️ Each condition is mutually exclusive, so a guest is marked at most once per run and carries a single `reasonCode`
-- 🚫 Skips any guest whose `extensionAttribute15` is `ExcludeFromLCM`, regardless of group membership
-- 🏷️ Actions:
-  - Set `extensionAttribute14 = "MarkedEligibleforRemoval"`
-  - Set `extensionAttribute15 = <UTC timestamp>`
-  - Disable account (`accountEnabled = false`) when `ReportOnly = false`
-- 📤 Output: JSON report (evaluated, marked, disabled, details)
+```
+                 Entra ID tenant
+                       |
+   +-------------------+--------------------+
+   |                                        |
+GRP_SEC_GuestUserLCM_AllGuests      GRP_SEC_GuestUserLCM_EligibleForRemoval
+ (guests, enabled, not excluded)     (extensionAttribute14 set, disabled)
+   |                                        |
+   v                                        v
+Logic App 1: Mark                     Logic App 2: Delete
+ Sunday 01:00                          Sunday 03:00
+ reads  signInActivity                 reads  extensionAttribute14 + 15
+        createdDateTime                       accountEnabled
+        extensionAttribute13 (expiry)
+        extensionAttribute15 (exclusion)
+ writes extensionAttribute14 = MarkedEligibleforRemoval
+        extensionAttribute15 = <UTC timestamp>
+        accountEnabled = false                DELETE /users/{id}
+   |                                        |
+   +--------> JSON run report <-------------+
+```
 
-2) Logic-EntraIDGuestLCM-DeleteGuestUsersAfterGracePeriod
-- ⏱️ Schedule: Weekly (e.g., Sunday, 03:00)
-- 🧮 Evaluates previously marked users
-- ✅ Deletes user when:
-  - `extensionAttribute14 = "MarkedEligibleforRemoval"`
-  - `extensionAttribute15` older than `DeletionThresholdDays`
-  - `accountEnabled = false`
-- 🗑️ Action: Delete user when `ReportOnly = false`
-- 📤 Output: JSON report (evaluated, deleted, failed, details)
+### Logic App 1: Mark Guests Eligible for Removal
+
+Schedule: weekly, Sunday 01:00. Evaluates every member of the All Guests group
+and marks a guest when **any one** of three conditions holds.
+
+| `reasonCode` | `reason` in the report | Condition |
+| --- | --- | --- |
+| `inactivity` | Inactive - Last sign-in before threshold | Has sign-in activity, and the last sign-in is older than `InactivityThresholdDays` |
+| `never-signed-in` | Never logged in | No sign-in activity, `createdDateTime` present, and older than **both** `InactivityThresholdDays` **and** `NewAccountGraceDays` |
+| `expiry` | Approved access period expired | `extensionAttribute13` parses as `yyyy-MM-dd` and is before today |
+
+The three conditions are mutually exclusive by construction, so a guest is marked
+at most once per run and carries exactly one `reasonCode`.
+
+On a match, and only when `ReportOnly = false`:
+
+- `extensionAttribute14 = "MarkedEligibleforRemoval"`
+- `extensionAttribute15 = <current UTC timestamp>`
+- `accountEnabled = false`
+
+Guests whose `extensionAttribute15` is `ExcludeFromLCM` are skipped outright: never
+marked, never disabled, regardless of group membership. See
+[How exclusion actually works](#-how-exclusion-actually-works).
+
+### Logic App 2: Delete Guests After Grace Period
+
+Schedule: weekly, Sunday 03:00. Evaluates every member of the Eligible For Removal
+group and deletes a guest when **all** of the following hold:
+
+- `extensionAttribute14 = "MarkedEligibleforRemoval"`
+- `extensionAttribute15` is older than `DeletionThresholdDays`
+- `accountEnabled = false`
+
+Deletion happens only when `ReportOnly = false`. The two hour gap between the
+schedules lets the disable plus tag propagate into the Eligible For Removal group
+before the Delete app enumerates it.
+
+---
+
+## 🔗 Extension Attribute Contract
+
+Three `onPremisesExtensionAttributes` fields carry the whole lifecycle. This is the
+contract; nothing else is shared between the two Logic Apps.
+
+| Attribute | Written by | Read by | Meaning |
+| --- | --- | --- | --- |
+| `extensionAttribute13` | **VouchGate** (never by this solution) | Mark app | Approved access end date. A parseable `yyyy-MM-dd` in the past marks the guest with `reasonCode: expiry`. |
+| `extensionAttribute14` | Mark app | Delete app, Eligible For Removal group rule | Lifecycle flag, always the literal `MarkedEligibleforRemoval`. |
+| `extensionAttribute15` | Mark app (timestamp), an administrator (exclusion flag) | Delete app, All Guests group rule | Dual purpose: the UTC timestamp of when the guest was marked, **or** the sentinel `ExcludeFromLCM` that excludes the guest permanently. |
+
+Details that matter in practice:
+
+- **`extensionAttribute13` is read only here.** This solution never writes it. Empty, null, whitespace and unparseable values all mean "no expiry set" and never mark. Only a well formed `yyyy-MM-dd` prefix with an in range month and day is compared against today, so a malformed value can never cause a guest to be disabled.
+- **`extensionAttribute14` is the same literal for all three mark reasons.** The Delete app gates on exact equality with `MarkedEligibleforRemoval`, so a reason specific value would break the handoff. The reason lives in the report, not in the attribute.
+- **`extensionAttribute15` carries two meanings in one field.** Newly marked guests are disabled and therefore fall out of the All Guests group, which requires `accountEnabled = true`. Keep this field dedicated to this solution: if it holds anything other than `ExcludeFromLCM`, marking overwrites it with a timestamp.
+
+`extensionAttribute14` and `extensionAttribute15` must be free for this solution's
+use in your tenant. `extensionAttribute13` must be free or owned by VouchGate.
+
+---
+
+## 🤝 Works together with VouchGate
+
+[**VouchGate**](https://github.com/daniel-fraubaum/VouchGate) handles the other end
+of the same guest lifecycle. The two projects are independent, deploy separately,
+and are useful on their own, but they are designed to pair:
+
+| | VouchGate | This project (LCM) |
+| --- | --- | --- |
+| Concern | **Controlled entry** | **Controlled exit** |
+| Question it answers | Who may become a guest, sponsored by whom, and until when? | Which guests have outlived their access, and what happens to them? |
+| Writes | `extensionAttribute13` (approved access end date) | `extensionAttribute14`, `extensionAttribute15`, `accountEnabled` |
+| Reads | its own approval state | `extensionAttribute13`, `signInActivity`, `createdDateTime` |
+
+The join between them is a single field. VouchGate records **when an approved
+access period ends** in `extensionAttribute13`; the Mark app reads it and, once
+that date is in the past, marks the guest with `reasonCode: expiry`. Access that
+was granted deliberately therefore expires deliberately, instead of waiting for
+the inactivity threshold to catch up.
+
+Two boundaries worth being explicit about:
+
+- **VouchGate never sets the exclusion flag.** `extensionAttribute15 = "ExcludeFromLCM"` is an administrative decision, applied by a human out of band. Nothing in VouchGate writes it, so an approval flowing through VouchGate can never accidentally make a guest permanently immune to the lifecycle.
+- **This project never writes `extensionAttribute13`.** It only reads it. An expired guest keeps its original expiry date in the report as `accessExpiredOn`, which stays auditable against whatever VouchGate recorded.
+
+Running LCM without VouchGate is fine: leave `extensionAttribute13` unset and the
+`expiry` reason simply never fires, leaving inactivity and never-signed-in.
 
 ---
 
@@ -72,7 +163,7 @@ This solution consists of two independent Logic Apps:
 > ### ⚠️ Reading `signInActivity` has two hard requirements
 >
 > The Mark Logic App decides who is inactive from the `signInActivity` property on
-> the user object. Reading it requires **both** of the following — miss either one
+> the user object. Reading it requires **both** of the following - miss either one
 > and Microsoft Graph simply omits the property, so no guest is ever identified as
 > inactive:
 >
@@ -80,16 +171,16 @@ This solution consists of two independent Logic Apps:
 >    managed identity.
 > 2. A **Microsoft Entra ID P1 or P2 license** in the tenant.
 >
-> Sources: [List users — sign-in activity example](https://learn.microsoft.com/graph/api/user-list?view=graph-rest-1.0#examples) ·
+> Sources: [List users - sign-in activity example](https://learn.microsoft.com/graph/api/user-list?view=graph-rest-1.0#examples) ·
 > [How to detect and investigate inactive user accounts](https://learn.microsoft.com/entra/identity/monitoring-health/howto-manage-inactive-user-accounts)
 
 - ☁️ Azure subscription with permissions to deploy Logic Apps (Contributor)
 - 🧭 Entra ID tenant with guest users, licensed **Microsoft Entra ID P1 or P2**
 - 🧱 Two free extension attributes (e.g., `extensionAttribute14`, `extensionAttribute15`)
 - 🔐 Microsoft Graph API app roles granted to **each** Logic App’s System-assigned Managed Identity
-  - `AuditLog.Read.All` — **required**, gates `signInActivity`
-  - `User.ReadWrite.All` — **required**, to disable and delete guests
-  - `GroupMember.Read.All` — required to enumerate the source groups
+  - `AuditLog.Read.All` - **required**, gates `signInActivity`
+  - `User.ReadWrite.All` - **required**, to disable and delete guests
+  - `GroupMember.Read.All` - required to enumerate the source groups
 - 🛡️ **Privileged Role Administrator** or **Global Administrator** to grant those app roles
 - 🆔 Ability to enable System-assigned Managed Identity
 - 🧰 Azure CLI, plus `jq` if you use the Bash deploy script
@@ -97,13 +188,7 @@ This solution consists of two independent Logic Apps:
 📘 Full walkthrough, including the mandatory first run in report-only mode:
 **[docs/deployment.md](docs/deployment.md)**
 
-Note on extension attributes:
-- `extensionAttribute13` → **read-only input**, the approved access end date (written by VouchGate). A date in the past marks the guest with reason `expiry`. Empty, null or unparseable values mean “no expiry set” and never mark.
-- `extensionAttribute14` → lifecycle flag (`"MarkedEligibleforRemoval"`). The same literal is written for **all three** mark reasons, because the Delete Logic App gates on exact equality with it — a reason-specific value would break the Mark → Delete handoff. The reason lives in the report, not in the attribute.
-- `extensionAttribute15` → dual purpose:
-  - Exclusion flag for the “All Guests” group when set to `"ExcludeFromLCM"`
-  - Timestamp when a user is marked for removal
-- ℹ️ Newly marked users are disabled and thus fall out of the “All Guests” dynamic group (which requires `accountEnabled = true`). Ensure `extensionAttribute15` isn’t used for other purposes in your tenant.
+📋 Extension attributes: see [Extension Attribute Contract](#-extension-attribute-contract).
 
 ### 🚫 How exclusion actually works
 
@@ -122,7 +207,7 @@ it. Changing the sentinel value means editing that membership rule; nothing in
 **Second line of defence, in the workflow itself.** Because dynamic membership
 re-evaluation is not instantaneous, the Mark workflow *also* checks
 `extensionAttribute15` on every guest it evaluates and skips any whose value is
-`ExcludeFromLCM` (compared case-insensitively) — never marking, never disabling,
+`ExcludeFromLCM` (compared case-insensitively) - never marking, never disabling,
 regardless of how it ended up in the group. Skipped guests are listed in the
 report's `excluded[]` section.
 
@@ -131,7 +216,7 @@ report's `excluded[]` section.
 | Situation | Outcome |
 | --- | --- |
 | Guest excluded *before* ever being marked | Safe. Not in the group → never evaluated → the flag survives. |
-| Guest excluded *after* it was already marked | The mark timestamp is replaced by `"ExcludeFromLCM"`. The Delete workflow compares that value against a threshold date, and `"ExcludeFromLCM"` sorts after any ISO date, so the guest is **not** deleted. Exclusion wins — the safe direction. |
+| Guest excluded *after* it was already marked | The mark timestamp is replaced by `"ExcludeFromLCM"`. The Delete workflow compares that value against a threshold date, and `"ExcludeFromLCM"` sorts after any ISO date, so the guest is **not** deleted. Exclusion wins - the safe direction. |
 | Guest is excluded but still in the group (rule not yet re-evaluated, or membership cached) | **Safe since v2.0.0.** The in-workflow guard skips it and records it under `excluded[]`, so the exclusion flag is no longer overwritten by the mark timestamp. Before v2.0.0 this destroyed the exclusion permanently. |
 
 ⚠️ The guard protects the flag, not the field: if you use `extensionAttribute15`
@@ -163,7 +248,126 @@ Create two dynamic security groups in Entra ID to scope and monitor the lifecycl
 
 ---
 
-## ⚙️ Logic App 1 — Mark Guests Eligible for Removal
+## 🚀 Deploy Quickstart
+
+Both Logic Apps deploy together from `infra/`. The scripts create the resource
+group, deploy the Bicep, and grant the Microsoft Graph app roles to both managed
+identities. They are idempotent, so re-run them freely.
+
+**Linux, macOS, Azure Cloud Shell**
+
+```bash
+git clone https://github.com/daniel-fraubaum/EntraID-Guest-User-LifeCycle-Management.git
+cd EntraID-Guest-User-LifeCycle-Management
+
+az login
+az account set --subscription "<subscription-id>"
+
+./infra/deploy.sh \
+  --resource-group rg-entraid-guest-lcm \
+  --location westeurope \
+  --all-guests-group-id "<objectId of GRP_SEC_GuestUserLCM_AllGuests>" \
+  --eligible-group-id  "<objectId of GRP_SEC_GuestUserLCM_EligibleForRemoval>"
+```
+
+**Windows PowerShell / pwsh**
+
+```powershell
+./infra/deploy.ps1 `
+  -ResourceGroup rg-entraid-guest-lcm `
+  -Location westeurope `
+  -AllGuestsGroupId "<objectId of GRP_SEC_GuestUserLCM_AllGuests>" `
+  -EligibleGroupId  "<objectId of GRP_SEC_GuestUserLCM_EligibleForRemoval>"
+```
+
+Useful partial runs:
+
+| Goal | Command |
+| --- | --- |
+| Re-assign Graph roles only | `./infra/deploy.sh --resource-group RG --skip-infra` |
+| Infrastructure only, roles later | `./infra/deploy.sh --resource-group RG ... --skip-permissions` |
+| Flip the dry-run switch only | `./infra/deploy.sh --resource-group RG --skip-infra --report-only false` |
+
+📘 Full walkthrough: **[docs/deployment.md](docs/deployment.md)**
+
+---
+
+## 🧪 Start with ReportOnly, always
+
+**Both Logic Apps ship with `ReportOnly = true` and you should leave it that way
+for the first runs.** Deleting a guest is irreversible once the Entra ID deleted
+users retention window passes, and a misjudged threshold or an unexpected
+`extensionAttribute13` backfill can select far more guests than you expect.
+
+In report-only mode both apps evaluate every guest and report exactly what they
+*would* do, without touching a single account.
+
+1. **Deploy.** `ReportOnly = true` is the default, so nothing else is needed.
+2. **Trigger a run by hand** rather than waiting for Sunday:
+
+   ```bash
+   SUBSCRIPTION_ID=$(az account show --query id -o tsv)
+   az rest --method POST --url \
+     "https://management.azure.com/subscriptions/${SUBSCRIPTION_ID}/resourceGroups/rg-entraid-guest-lcm/providers/Microsoft.Logic/workflows/Logic-EntraIDGuestLCM-MarkGuestsEligibleforRemoval/triggers/Recurrence/run?api-version=2016-06-01"
+   ```
+
+3. **Read the report.** Portal, Logic App, Run history, newest run, then the
+   `Generate_JSON_Report` action (Mark) or `Generate_Final_Report` (Delete). Check:
+   - `reportMetadata.mode` is `Report Only`, proving nothing changed
+   - `reportMetadata.totalMembersFound` is not zero, which would mean the group is empty or unreadable
+   - the mix of `affectedUsers[].reasonCode` values looks plausible for your tenant
+   - `summary.warnings`, `throttledUnprocessed[]` and `errors[]` are empty
+   - spot check a handful of UPNs by hand against the Entra ID sign-in logs
+4. **Repeat for the Delete app**, whose report should list only guests that the
+   Mark app tagged at least `DeletionThresholdDays` ago.
+5. **Go live**, one app at a time:
+
+   ```bash
+   ./infra/deploy.sh --resource-group rg-entraid-guest-lcm --skip-infra --report-only false
+   ```
+
+   Leaving the Delete app in report-only for a full extra cycle after the Mark app
+   goes live is the cautious path.
+
+---
+
+## ⚙️ Parameters
+
+Set on `infra/main.bicep`; each is passed through to the matching Logic App
+parameter. Defaults are safe: report-only, weekly, conservative thresholds.
+
+| Bicep parameter | Logic App parameter | Default | Applies to | Meaning |
+| --- | --- | --- | --- | --- |
+| `allGuestsGroupId` | `guestSourceGroupId` | *required* | Mark | Object ID of `GRP_SEC_GuestUserLCM_AllGuests` |
+| `eligibleForRemovalGroupId` | `guestSourceGroupId` | *required* | Delete | Object ID of `GRP_SEC_GuestUserLCM_EligibleForRemoval` |
+| `inactivityThresholdDays` | `InactivityThresholdDays` | `180` | Mark | Days since last sign-in before a guest is marked |
+| `newAccountGraceDays` | `NewAccountGraceDays` | `30` | Mark | Minimum account age before a never-signed-in guest may be marked |
+| `deletionThresholdDays` | `DeletionThresholdDays` | `30` | Delete | Days after marking before deletion |
+| `reportOnly` | `ReportOnly` | `true` | Both | Dry run. Nothing is disabled or deleted while true |
+| `batchSize` | `BatchSize` | `20` | Both | Users per Microsoft Graph `$batch` request, 1-100 |
+| `location` | n/a | resource group location | Both | Azure region |
+| `markWorkflowName` | n/a | `Logic-EntraIDGuestLCM-MarkGuestsEligibleforRemoval` | Mark | Logic App resource name |
+| `deleteWorkflowName` | n/a | `Logic-EntraIDGuestLCM-DeleteGuestUsersAfterGracePeriod` | Delete | Logic App resource name |
+| `workflowState` | n/a | `Enabled` | Both | `Disabled` deploys without arming the weekly schedule |
+| `tags` | n/a | `{}` | Both | Tags applied to both Logic Apps |
+
+Two notes on semantics:
+
+- **`newAccountGraceDays` is an additional guard, not a replacement.** A
+  never-signed-in guest must be older than `inactivityThresholdDays` **and** older
+  than `newAccountGraceDays`. With the defaults the 180 day threshold binds, so
+  behaviour matches v1. The grace period only becomes the binding constraint when
+  it is the larger of the two, which is exactly the case it exists for: guests
+  invited by email may legitimately have no sign-in for weeks before first
+  redemption. If you lower `inactivityThresholdDays` to, say, 14 days, raise
+  `newAccountGraceDays` to keep fresh invitations safe.
+- **There is no exclusion parameter.** Exclusion is enforced by the dynamic group
+  membership rule plus an in-workflow guard, not by configuration. See
+  [How exclusion actually works](#-how-exclusion-actually-works).
+
+---
+
+## ⚙️ Logic App 1 - Mark Guests Eligible for Removal
 
 Find inactive guest users and mark them for removal.
 
@@ -183,7 +387,7 @@ Find inactive guest users and mark them for removal.
   - `extensionAttribute14 = "MarkedEligibleforRemoval"`
   - `extensionAttribute15 = <current UTC datetime>`
   - Disable account when `ReportOnly = false`
-- 📤 Output: JSON report — see [Reports](#-reports)
+- 📤 Output: JSON report - see [Reports](#-reports)
 
 Parameters
 - `guestSourceGroupId`: Object ID of `GRP_SEC_GuestUserLCM_AllGuests`
@@ -196,7 +400,7 @@ Parameters
 never-signed-in guest must be older than both thresholds, so with the defaults
 (`180` / `30`) the 180-day threshold is the binding one and behaviour is unchanged.
 The grace period only starts to matter when you lower `InactivityThresholdDays`
-below it — which is exactly the case it exists to protect, since guests invited by
+below it - which is exactly the case it exists to protect, since guests invited by
 email may legitimately have no sign-in for weeks before first redemption.
 
 ℹ️ **Expiry marking treats anything unparseable as “no expiry set.”** Null, empty,
@@ -205,7 +409,7 @@ ignored rather than marked. Only a well-formed `yyyy-MM-dd` prefix with an
 in-range month and day is compared against today, so a malformed value can never
 cause a guest to be disabled.
 
-Deployment — both Logic Apps are deployed together from `infra/`:
+Deployment - both Logic Apps are deployed together from `infra/`:
 ```bash
 ./infra/deploy.sh --resource-group rg-entraid-guest-lcm \
   --all-guests-group-id <guid> --eligible-group-id <guid>
@@ -224,7 +428,7 @@ for the PowerShell equivalent, partial runs, and how to go live.
 
 ---
 
-## 🧹 Logic App 2 — Delete Guests After Grace Period
+## 🧹 Logic App 2 - Delete Guests After Grace Period
 
 Delete previously marked guest users after a grace period.
 
@@ -251,7 +455,7 @@ Parameters
 - `ReportOnly`: `true` (only report) or `false` (delete users)
 - `BatchSize`: Users per run (default: `20`)
 
-Deployment — deployed by the same `infra/deploy.sh` run as Logic App 1; no
+Deployment - deployed by the same `infra/deploy.sh` run as Logic App 1; no
 separate steps. See **[docs/deployment.md](docs/deployment.md)**.
 
 🧪 Test & Verify
@@ -270,12 +474,12 @@ the Portal under **Run history → the run → `Generate_JSON_Report`** (Mark) o
 **`Generate_Final_Report`** (Delete). See
 [docs/deployment.md](docs/deployment.md#2-read-the-report) for the CLI route.
 
-### Mark app — `Generate_JSON_Report`
+### Mark app - `Generate_JSON_Report`
 
 Every entry in `affectedUsers[]` carries a machine-readable `reasonCode`
 (`inactivity` | `never-signed-in` | `expiry`) alongside the human-readable
 `reason`, so a `ReportOnly` run distinguishes *why* each guest was selected.
-The remaining fields vary by reason — each carries the dates relevant to its own
+The remaining fields vary by reason - each carries the dates relevant to its own
 condition.
 
 ```json
@@ -397,9 +601,9 @@ The three new sections are always present, empty when nothing applies:
 
 | Section | Meaning | Action needed |
 | --- | --- | --- |
-| `throttledUnprocessed[]` | Requests that were still `429`/`5xx` after the final retry attempt. **These guests were not evaluated or not disabled this run.** | Usually none — the next scheduled run picks them up. A persistently large count means `BatchSize` is too high for your tenant's throttling limits. |
+| `throttledUnprocessed[]` | Requests that were still `429`/`5xx` after the final retry attempt. **These guests were not evaluated or not disabled this run.** | Usually none - the next scheduled run picks them up. A persistently large count means `BatchSize` is too high for your tenant's throttling limits. |
 | `errors[]` | Per-item `4xx` other than `429`: permanent failures, not retried. `403` means a missing Graph app role; `404` usually means the guest was deleted between enumeration and evaluation. | Investigate `403`s. `404`s are typically benign. |
-| `excluded[]` | Guests skipped because `extensionAttribute15` is `ExcludeFromLCM`. Never marked, never disabled. | None — this is the guard working. |
+| `excluded[]` | Guests skipped because `extensionAttribute15` is `ExcludeFromLCM`. Never marked, never disabled. | None - this is the guard working. |
 
 `requestId` is the batch request id: the bare user object id for the read phase,
 and `disable-<userId>` for the disable phase. `phase` disambiguates
@@ -416,10 +620,10 @@ Per-reason fields in `affectedUsers[]`:
 Common to all: `userId`, `displayName`, `userPrincipalName`, `mail`, `reason`,
 `reasonCode`, `actionTaken` (`REPORT ONLY` or `DISABLED`), `timestamp`.
 
-### Delete app — `Generate_Final_Report`
+### Delete app - `Generate_Final_Report`
 
 The Delete app reports on the guests it evaluated for deletion. It does not
-distinguish mark reasons — by the time a guest reaches it, all three reasons look
+distinguish mark reasons - by the time a guest reaches it, all three reasons look
 identical (`extensionAttribute14 = "MarkedEligibleforRemoval"`).
 
 ```json
@@ -487,7 +691,7 @@ the delete counter sees them.
 
 Microsoft Graph JSON batching returns **`200` for the batch as a whole** while
 each response *inside* it carries its own status code. A `429` on an individual
-item therefore does not surface as a failed HTTP call — which is how throttled
+item therefore does not surface as a failed HTTP call - which is how throttled
 guests used to be dropped without a trace
 ([#2](https://github.com/daniel-fraubaum/EntraID-Guest-User-LifeCycle-Management/issues/2)).
 
@@ -495,14 +699,14 @@ Every `$batch` call is now wrapped in a retry loop:
 
 | Per-item status | Treatment |
 | --- | --- |
-| `2xx` / `3xx` | Success — processed as normal |
+| `2xx` / `3xx` | Success - processed as normal |
 | `429` | Retried, honouring `Retry-After` |
 | `5xx` | Retried on the same path as `429` |
-| `4xx` except `429` | **Not** retried — recorded in `errors[]` |
+| `4xx` except `429` | **Not** retried - recorded in `errors[]` |
 
 - Only the affected items are resent; successful items are never re-sent.
 - The wait is the **highest** `Retry-After` among the throttled items, falling back to **30 s** when the header is absent and capped at **300 s** so one pathological value cannot exhaust the loop timeout.
-- Up to **5 attempts**. Whatever is still failing afterwards lands in `throttledUnprocessed[]` with a warning in `summary.warnings` — **the run does not fail**, so the remaining work is visible and the next scheduled run retries it.
+- Up to **5 attempts**. Whatever is still failing afterwards lands in `throttledUnprocessed[]` with a warning in `summary.warnings` - **the run does not fail**, so the remaining work is visible and the next scheduled run retries it.
 
 💡 A consistently non-empty `throttledUnprocessed[]` means `BatchSize` is too
 aggressive for your tenant. Lower it and redeploy.
@@ -521,7 +725,7 @@ aggressive for your tenant. Lower it and redeploy.
 ## 🛡️ Safety Tips
 
 - 🧪 Start with `ReportOnly = true` for both Logic Apps to validate logic and outputs.
-- 🙅 Exclude VIP/service-linked guests by setting `extensionAttribute15 = "ExcludeFromLCM"`, then **confirm they have left the “All Guests” group** before the next Mark run — see [How exclusion actually works](#-how-exclusion-actually-works).
+- 🙅 Exclude VIP/service-linked guests by setting `extensionAttribute15 = "ExcludeFromLCM"`, then **confirm they have left the “All Guests” group** before the next Mark run - see [How exclusion actually works](#-how-exclusion-actually-works).
 - 📅 Check `affectedUsers[].reasonCode` in the first report: a spike in `expiry` usually means `extensionAttribute13` was backfilled with old dates.
 - 📉 Watch for Graph API throttling; tune `BatchSize` as needed.
 - 📝 Consider exporting reports to Storage/Log Analytics for auditing.
@@ -541,7 +745,7 @@ aggressive for your tenant. Lower it and redeploy.
 - 🔑 Permission errors:
   - Re-assign the Graph app roles: `./infra/deploy.sh --resource-group <rg> --skip-infra`
   - Verify Graph App Role assignments are “Granted” on **both** managed identities
-  - Confirm the tenant has a Microsoft Entra ID P1/P2 license — without it `signInActivity` is never returned
+  - Confirm the tenant has a Microsoft Entra ID P1/P2 license - without it `signInActivity` is never returned
 
 📘 Full troubleshooting table: **[docs/deployment.md](docs/deployment.md#troubleshooting)**
 
@@ -549,15 +753,42 @@ aggressive for your tenant. Lower it and redeploy.
 
 ## 🔒 Security & Compliance
 
-- 🗑️ Deleting users is irreversible after the Deleted Users retention period — validate with `ReportOnly` first.
+- 🗑️ Deleting users is irreversible after the Deleted Users retention period - validate with `ReportOnly` first.
 - 📜 Review your organization’s data retention and guest user policies before enabling deletion.
 - 🔏 Restrict who can modify the Logic Apps and their Managed Identities.
+
+---
+
+## ⬆️ Upgrading from v1
+
+Already running the v1 Logic Apps? Read
+**[docs/migration-v1-to-v2.md](docs/migration-v1-to-v2.md)** before redeploying.
+
+Short version:
+
+- Redeploying with `infra/deploy.sh` **updates your existing Logic Apps in place.** The managed identity object IDs are preserved, so the Graph app roles you already granted stay valid, and run history is kept.
+- Everything previously hardcoded in the workflow JSON is now a deployment parameter. The one rename is `Threshold` to `InactivityThresholdDays`.
+- `ReportOnly` is reset to `true` on redeploy unless you pass `--report-only false`. That is deliberate: validate the new marking conditions before letting them act.
+- ⚠️ **v1 misclassified every successful disable as an error.** Graph returns `204` for `PATCH /users/{id}` and v1 checked for `200`, so v1 runs with `ReportOnly = false` reported `accountsDisabled: 0`, terminated as Failed with an empty error message, produced no report, and stopped after the first batch. **Accounts were still disabled correctly** - only the classification was wrong. Details and what to do about your v1 history are in the migration note.
 
 ---
 
 ## 🤝 Contributing
 
 Issues and PRs are welcome. Please describe your environment, steps to reproduce, and include relevant run outputs when filing an issue.
+
+⚠️ **Before changing a workflow definition:** both workflows sit at the Logic Apps
+**nesting depth limit of 8**, with no headroom on the per-user evaluation path. New
+conditions must be merged into an existing condition's `expression` or added as a
+sibling action, never wrapped in another nested `If`, which would produce depth 9
+and be rejected at deployment time. Validate with:
+
+```bash
+python3 scripts/validate-workflows.py
+```
+
+See **[CONTRIBUTING.md](CONTRIBUTING.md#-both-workflows-sit-at-the-nesting-depth-limit)**
+for the worked example and the full list of rules the validator enforces.
 
 ---
 
