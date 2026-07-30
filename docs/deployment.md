@@ -223,6 +223,14 @@ What to check in the report before going live:
 The three reasons are mutually exclusive by construction, so a guest appears at
 most once per run and produces at most one disable request.
 
+Also check the three bookkeeping sections — they are always present and empty when
+nothing applies:
+
+- **`summary.warnings[]`** — read this first. Non-empty means some work did not complete.
+- **`throttledUnprocessed[]`** — requests still `429`/`5xx` after 5 attempts. Those guests were **not** evaluated or **not** disabled this run. The next scheduled run retries them; a consistently non-empty list means `batchSize` is too aggressive for your tenant.
+- **`errors[]`** — per-item `4xx` other than `429`. A `403` here means a missing Graph app role; a `404` usually means the guest was deleted between enumeration and evaluation and is benign.
+- **`excluded[]`** (Mark only) — guests skipped because `extensionAttribute15` is `ExcludeFromLCM`. Seeing entries here is the guard working, not a problem.
+
 ### 3. Go live
 
 Once the report looks right:
@@ -290,17 +298,29 @@ workable but it can collide:
 | --- | --- |
 | Excluded *before* ever being marked | Safe. Never in the group → never evaluated → the flag survives. |
 | Excluded *after* being marked | The mark timestamp is replaced by `"ExcludeFromLCM"`. The Delete workflow compares that value against a threshold date, and `"ExcludeFromLCM"` sorts after any ISO date, so the guest is **not** deleted. Exclusion wins — the safe direction. |
-| Excluded but still in the group, because dynamic membership has not re-evaluated | The Mark workflow **overwrites the exclusion flag with the mark timestamp, destroying the exclusion permanently.** Nothing restores it. |
+| Excluded but still in the group, because dynamic membership has not re-evaluated | **Safe since v2.0.0.** See the guard below. |
 
-The third row is the operational hazard. Dynamic group membership is not
-instantaneous. After setting `extensionAttribute15 = "ExcludeFromLCM"`, confirm the
-guest has actually left `GRP_SEC_GuestUserLCM_AllGuests` before the next scheduled
-Mark run — or make the change while `reportOnly` is `true`, where nothing is
-written back at all.
+### Second line of defence: the in-workflow guard
 
-If you need exclusion that cannot be clobbered, use a field the workflow never
-writes: point the membership rule at a different unused `extensionAttribute`, or
-exclude by group membership instead. That is a change to the rule and the
+Dynamic group membership is not instantaneous, so the Mark workflow does not rely
+on the group alone. It checks `extensionAttribute15` on every guest it evaluates
+and skips any whose value is `ExcludeFromLCM` — never marking, never disabling —
+regardless of how that guest ended up in the group. The comparison is
+case-insensitive and whitespace-trimmed, so `excludefromlcm` and
+`" ExcludeFromLCM "` are both honoured; the dynamic membership rule itself is a
+case-sensitive exact match, so the guard is deliberately the more permissive of
+the two.
+
+Skipped guests appear in the report's `excluded[]` section with their UPN, so the
+guard is auditable rather than invisible. Before v2.0.0 a guest caught in
+re-evaluation lag had its exclusion flag permanently overwritten by the mark
+timestamp; that can no longer happen.
+
+The guard protects the *sentinel value*, not the field. If `extensionAttribute15`
+holds anything other than `ExcludeFromLCM`, marking still overwrites it with a
+timestamp. Keep the field dedicated to this solution — and if you need an
+exclusion the workflow can never touch, point the membership rule at a different
+unused `extensionAttribute` instead. That is a change to the rule and the
 prerequisites, not to the workflows.
 
 ---
@@ -318,10 +338,15 @@ prerequisites, not to the workflows.
 | Guests marked `reasonCode: expiry` unexpectedly | `extensionAttribute13` holds historical dates, e.g. from a backfill | Inspect the `accessExpiredOn` values in the report; clear or correct the attribute before leaving report-only |
 | A guest with an expiry date in the past is **not** marked | Value is not a parseable `yyyy-MM-dd`, or the guest already matched `inactivity` / `never-signed-in` in the same run | Check the exact attribute value; the three reasons are exclusive, so a guest already marked for another reason will not also appear as `expiry` |
 | An excluded guest got marked anyway | Dynamic group membership had not re-evaluated, so the guest was still a member and the mark overwrote `"ExcludeFromLCM"` | Restore the flag, confirm the guest leaves the group, and see [Exclusion](#exclusion-enforced-by-the-group-not-the-workflow) |
-| Run fails with a rate-limit message | Graph throttling on `$batch` | Lower `batchSize` and redeploy |
+| Run fails with a rate-limit message | Graph throttling on the `$batch` **call itself** (transport-level `429`), which is separate from per-item throttling | Lower `batchSize` and redeploy |
+| `throttledUnprocessed[]` is non-empty | Per-item `429`/`5xx` still failing after 5 retry attempts | Often no action: the next scheduled run retries. If it persists, lower `batchSize` |
+| Run takes far longer than usual | The retry loop is honouring `Retry-After` waits (up to 300 s per attempt, 5 attempts per batch) | Expected under throttling. Lower `batchSize` to reduce it |
+| `errors[]` contains `403` entries | A Graph app role is missing on that workflow's managed identity | `./infra/deploy.sh --resource-group RG --skip-infra` |
+| `errors[]` contains `404` entries | Guest was deleted between enumeration and evaluation | Benign; no action |
+| An excluded guest appears in `excluded[]` | The in-workflow guard caught a guest that was still in the source group | Expected during dynamic-membership lag; the guard prevented the mark |
 | Deployment fails: `expected value of type … 36` | A group ID is empty or not a GUID | Pass real object IDs — `main.bicep` rejects malformed ones rather than deploying a broken workflow |
 | `deploy.sh: jq not found` | jq missing | Install jq, or use `deploy.ps1`, or run in Azure Cloud Shell |
-| Delete run reports failures with status 404 | User already deleted, e.g. by a concurrent run | Harmless; the report lists them under `failedDeletes` |
+| Delete run reports failures with status 404 | User already deleted, e.g. by a concurrent run | Harmless. Since v2.0.0 these land in `errors[]` rather than `failedDeletes[]`, and no longer fail the run |
 
 ---
 

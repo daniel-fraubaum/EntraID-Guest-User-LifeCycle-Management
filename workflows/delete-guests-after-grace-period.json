@@ -381,7 +381,7 @@
         }
       },
       "runAfter": {
-        "Initialize_FailedDeletes": [
+        "Initialize_ItemErrors": [
           "Succeeded"
         ]
       },
@@ -450,93 +450,8 @@
                 }
               }
             },
-            "Compose_BatchPayload": {
-              "runAfter": {
-                "Select_BatchRequests": [
-                  "Succeeded"
-                ]
-              },
-              "type": "Compose",
-              "inputs": {
-                "requests": "@body('Select_BatchRequests')"
-              }
-            },
-            "GetUserInfosBatch": {
-              "runAfter": {
-                "Compose_BatchPayload": [
-                  "Succeeded"
-                ]
-              },
-              "type": "Http",
-              "inputs": {
-                "uri": "https://graph.microsoft.com/beta/$batch",
-                "method": "POST",
-                "body": "@outputs('Compose_BatchPayload')",
-                "authentication": {
-                  "type": "ManagedServiceIdentity",
-                  "audience": "https://graph.microsoft.com"
-                },
-                "retryPolicy": {
-                  "type": "exponential",
-                  "count": 3,
-                  "interval": "PT20S"
-                }
-              }
-            },
-            "Check_GetUserInfosBatch_Error": {
-              "actions": {
-                "Check_If_Rate_Limit": {
-                  "actions": {
-                    "Set_Rate_Limit_Flag": {
-                      "type": "SetVariable",
-                      "inputs": {
-                        "name": "HasRateLimit",
-                        "value": true
-                      }
-                    },
-                    "Set_Rate_Limit_Error": {
-                      "type": "SetVariable",
-                      "inputs": {
-                        "name": "ApiErrorMessage",
-                        "value": "@{concat('Graph API rate limit reached after processing ', string(variables('TotalProcessedUsers')), ' users.')}"
-                      }
-                    }
-                  },
-                  "else": {
-                    "actions": {}
-                  },
-                  "expression": {
-                    "equals": [
-                      "@outputs('GetUserInfosBatch')?['statusCode']",
-                      429
-                    ]
-                  },
-                  "type": "If"
-                }
-              },
-              "runAfter": {
-                "GetUserInfosBatch": [
-                  "Succeeded",
-                  "Failed",
-                  "TimedOut",
-                  "Skipped"
-                ]
-              },
-              "else": {
-                "actions": {}
-              },
-              "expression": {
-                "not": {
-                  "equals": [
-                    "@outputs('GetUserInfosBatch')?['statusCode']",
-                    200
-                  ]
-                }
-              },
-              "type": "If"
-            },
             "For_each_BatchResponse": {
-              "foreach": "@coalesce(body('GetUserInfosBatch')?['responses'], createArray())",
+              "foreach": "@variables('AggregatedResponses')",
               "actions": {
                 "Check_Response_Success": {
                   "actions": {
@@ -658,45 +573,16 @@
                 }
               },
               "runAfter": {
-                "Check_GetUserInfosBatch_Error": [
-                  "Succeeded",
-                  "Skipped"
+                "Check_Throttled_Remaining_GetUserInfos": [
+                  "Succeeded"
                 ]
               },
               "type": "Foreach"
             },
             "Check_HasDeleteRequests": {
               "actions": {
-                "Compose_DeleteBatchPayload": {
-                  "type": "Compose",
-                  "inputs": {
-                    "requests": "@variables('DeleteRequests')"
-                  }
-                },
-                "Execute_DeleteBatch": {
-                  "runAfter": {
-                    "Compose_DeleteBatchPayload": [
-                      "Succeeded"
-                    ]
-                  },
-                  "type": "Http",
-                  "inputs": {
-                    "uri": "https://graph.microsoft.com/beta/$batch",
-                    "method": "POST",
-                    "body": "@outputs('Compose_DeleteBatchPayload')",
-                    "authentication": {
-                      "type": "ManagedServiceIdentity",
-                      "audience": "https://graph.microsoft.com"
-                    },
-                    "retryPolicy": {
-                      "type": "exponential",
-                      "count": 3,
-                      "interval": "PT20S"
-                    }
-                  }
-                },
                 "Count_Successful_Deletes": {
-                  "foreach": "@coalesce(body('Execute_DeleteBatch')?['responses'], createArray())",
+                  "foreach": "@variables('AggregatedResponses')",
                   "actions": {
                     "Check_If_Delete_Success": {
                       "actions": {
@@ -724,25 +610,438 @@
                         }
                       },
                       "expression": {
-                        "equals": [
-                          "@item()?['status']",
-                          204
+                        "and": [
+                          {
+                            "greaterOrEquals": [
+                              "@item()?['status']",
+                              200
+                            ]
+                          },
+                          {
+                            "less": [
+                              "@item()?['status']",
+                              300
+                            ]
+                          }
                         ]
                       },
                       "type": "If"
                     }
                   },
                   "runAfter": {
-                    "Execute_DeleteBatch": [
+                    "Check_Throttled_Remaining_Delete": [
                       "Succeeded"
                     ]
                   },
                   "type": "Foreach"
+                },
+                "Do_Until_Delete_Retry": {
+                  "type": "Until",
+                  "expression": "@or(equals(length(variables('RetryRequests')), 0),greaterOrEquals(variables('RetryAttempt'), 5))",
+                  "limit": {
+                    "count": 5,
+                    "timeout": "PT1H"
+                  },
+                  "actions": {
+                    "Increment_Attempt_Delete": {
+                      "type": "IncrementVariable",
+                      "inputs": {
+                        "name": "RetryAttempt",
+                        "value": 1
+                      },
+                      "runAfter": {}
+                    },
+                    "Compose_Payload_Delete": {
+                      "type": "Compose",
+                      "inputs": {
+                        "requests": "@variables('PendingRequests')"
+                      },
+                      "runAfter": {
+                        "Increment_Attempt_Delete": [
+                          "Succeeded"
+                        ]
+                      }
+                    },
+                    "Filter_Success_Delete": {
+                      "type": "Query",
+                      "inputs": {
+                        "from": "@coalesce(body('Execute_DeleteBatch')?['responses'], createArray())",
+                        "where": "@and(greaterOrEquals(item()?['status'], 200), less(item()?['status'], 400))"
+                      },
+                      "runAfter": {
+                        "Execute_DeleteBatch": [
+                          "Succeeded"
+                        ]
+                      }
+                    },
+                    "Filter_Retryable_Delete": {
+                      "type": "Query",
+                      "inputs": {
+                        "from": "@coalesce(body('Execute_DeleteBatch')?['responses'], createArray())",
+                        "where": "@or(equals(item()?['status'], 429), greaterOrEquals(item()?['status'], 500))"
+                      },
+                      "runAfter": {
+                        "Filter_Success_Delete": [
+                          "Succeeded"
+                        ]
+                      }
+                    },
+                    "Filter_ClientError_Delete": {
+                      "type": "Query",
+                      "inputs": {
+                        "from": "@coalesce(body('Execute_DeleteBatch')?['responses'], createArray())",
+                        "where": "@and(and(greaterOrEquals(item()?['status'], 400), less(item()?['status'], 500)), not(equals(item()?['status'], 429)))"
+                      },
+                      "runAfter": {
+                        "Filter_Retryable_Delete": [
+                          "Succeeded"
+                        ]
+                      }
+                    },
+                    "Aggregate_Success_Delete": {
+                      "type": "SetVariable",
+                      "inputs": {
+                        "name": "AggregatedResponses",
+                        "value": "@union(variables('AggregatedResponses'), body('Filter_Success_Delete'))"
+                      },
+                      "runAfter": {
+                        "Filter_ClientError_Delete": [
+                          "Succeeded"
+                        ]
+                      }
+                    },
+                    "Select_ClientErrors_Delete": {
+                      "type": "Select",
+                      "inputs": {
+                        "from": "body('Filter_ClientError_Delete')",
+                        "select": {
+                          "requestId": "@item()?['id']",
+                          "status": "@item()?['status']",
+                          "errorCode": "@item()?['body']?['error']?['code']",
+                          "errorMessage": "@item()?['body']?['error']?['message']",
+                          "phase": "delete-guest",
+                          "attempt": "@variables('RetryAttempt')"
+                        }
+                      },
+                      "runAfter": {
+                        "Aggregate_Success_Delete": [
+                          "Succeeded"
+                        ]
+                      }
+                    },
+                    "Record_ClientErrors_Delete": {
+                      "type": "SetVariable",
+                      "inputs": {
+                        "name": "ItemErrors",
+                        "value": "@union(variables('ItemErrors'), body('Select_ClientErrors_Delete'))"
+                      },
+                      "runAfter": {
+                        "Select_ClientErrors_Delete": [
+                          "Succeeded"
+                        ]
+                      }
+                    },
+                    "Select_Retry_Ids_Delete": {
+                      "type": "Select",
+                      "inputs": {
+                        "from": "body('Filter_Retryable_Delete')",
+                        "select": "@item()?['id']"
+                      },
+                      "runAfter": {
+                        "Record_ClientErrors_Delete": [
+                          "Succeeded"
+                        ]
+                      }
+                    },
+                    "Filter_Retry_Requests_Delete": {
+                      "type": "Query",
+                      "inputs": {
+                        "from": "@variables('PendingRequests')",
+                        "where": "@contains(body('Select_Retry_Ids_Delete'), item()?['id'])"
+                      },
+                      "runAfter": {
+                        "Select_Retry_Ids_Delete": [
+                          "Succeeded"
+                        ]
+                      }
+                    },
+                    "Select_RetryAfter_Delete": {
+                      "type": "Select",
+                      "inputs": {
+                        "from": "body('Filter_Retryable_Delete')",
+                        "select": "@int(coalesce(item()?['headers']?['Retry-After'], item()?['headers']?['retry-after'], '0'))"
+                      },
+                      "runAfter": {
+                        "Filter_Retry_Requests_Delete": [
+                          "Succeeded"
+                        ]
+                      }
+                    },
+                    "Set_RetryWait_Delete": {
+                      "type": "SetVariable",
+                      "inputs": {
+                        "name": "RetryWaitSeconds",
+                        "value": "@if(greater(max(union(body('Select_RetryAfter_Delete'), createArray(0))), 0),min(max(union(body('Select_RetryAfter_Delete'), createArray(0))), 300),30)"
+                      },
+                      "runAfter": {
+                        "Select_RetryAfter_Delete": [
+                          "Succeeded"
+                        ]
+                      }
+                    },
+                    "Set_RetryRequests_Delete": {
+                      "type": "SetVariable",
+                      "inputs": {
+                        "name": "RetryRequests",
+                        "value": "@body('Filter_Retry_Requests_Delete')"
+                      },
+                      "runAfter": {
+                        "Set_RetryWait_Delete": [
+                          "Succeeded"
+                        ]
+                      }
+                    },
+                    "Set_Pending_Next_Delete": {
+                      "type": "SetVariable",
+                      "inputs": {
+                        "name": "PendingRequests",
+                        "value": "@variables('RetryRequests')"
+                      },
+                      "runAfter": {
+                        "Set_RetryRequests_Delete": [
+                          "Succeeded"
+                        ]
+                      }
+                    },
+                    "Check_Should_Wait_Delete": {
+                      "type": "If",
+                      "expression": {
+                        "and": [
+                          {
+                            "greater": [
+                              "@length(variables('RetryRequests'))",
+                              0
+                            ]
+                          },
+                          {
+                            "less": [
+                              "@variables('RetryAttempt')",
+                              5
+                            ]
+                          }
+                        ]
+                      },
+                      "actions": {
+                        "Wait_RetryAfter_Delete": {
+                          "type": "Wait",
+                          "inputs": {
+                            "interval": {
+                              "count": "@variables('RetryWaitSeconds')",
+                              "unit": "Second"
+                            }
+                          }
+                        }
+                      },
+                      "else": {
+                        "actions": {}
+                      },
+                      "runAfter": {
+                        "Set_Pending_Next_Delete": [
+                          "Succeeded"
+                        ]
+                      }
+                    },
+                    "Execute_DeleteBatch": {
+                      "type": "Http",
+                      "inputs": {
+                        "uri": "https://graph.microsoft.com/beta/$batch",
+                        "method": "POST",
+                        "body": "@outputs('Compose_Payload_Delete')",
+                        "authentication": {
+                          "type": "ManagedServiceIdentity",
+                          "audience": "https://graph.microsoft.com"
+                        },
+                        "retryPolicy": {
+                          "type": "exponential",
+                          "count": 3,
+                          "interval": "PT20S"
+                        }
+                      },
+                      "runAfter": {
+                        "Compose_Payload_Delete": [
+                          "Succeeded"
+                        ]
+                      }
+                    },
+                    "Check_Execute_DeleteBatch_Error": {
+                      "actions": {
+                        "Check_If_Rate_Limit_Delete": {
+                          "actions": {
+                            "Set_Rate_Limit_Delete": {
+                              "type": "SetVariable",
+                              "inputs": {
+                                "name": "HasRateLimit",
+                                "value": true
+                              }
+                            },
+                            "Set_Rate_Limit_Delete_Message": {
+                              "type": "SetVariable",
+                              "inputs": {
+                                "name": "ApiErrorMessage",
+                                "value": "@{concat('Rate limit during delete operations. Processed: ', string(variables('TotalProcessedUsers')), ', Deleted: ', string(variables('SuccessfulDeletes')))}"
+                              }
+                            }
+                          },
+                          "else": {
+                            "actions": {}
+                          },
+                          "expression": {
+                            "equals": [
+                              "@outputs('Execute_DeleteBatch')?['statusCode']",
+                              429
+                            ]
+                          },
+                          "type": "If"
+                        }
+                      },
+                      "runAfter": {
+                        "Check_Should_Wait_Delete": [
+                          "Succeeded",
+                          "Skipped"
+                        ]
+                      },
+                      "else": {
+                        "actions": {}
+                      },
+                      "expression": {
+                        "and": [
+                          {
+                            "greater": [
+                              "@length(variables('DeleteRequests'))",
+                              0
+                            ]
+                          },
+                          {
+                            "not": {
+                              "equals": [
+                                "@parameters('ReportOnly')",
+                                true
+                              ]
+                            }
+                          },
+                          {
+                            "not": {
+                              "equals": [
+                                "@outputs('Execute_DeleteBatch')?['statusCode']",
+                                200
+                              ]
+                            }
+                          }
+                        ]
+                      },
+                      "type": "If"
+                    }
+                  },
+                  "runAfter": {
+                    "Set_Pending_Initial_Delete": [
+                      "Succeeded"
+                    ]
+                  }
+                },
+                "Reset_Attempt_Delete": {
+                  "type": "SetVariable",
+                  "inputs": {
+                    "name": "RetryAttempt",
+                    "value": 0
+                  },
+                  "runAfter": {}
+                },
+                "Reset_Aggregated_Delete": {
+                  "type": "SetVariable",
+                  "inputs": {
+                    "name": "AggregatedResponses",
+                    "value": []
+                  },
+                  "runAfter": {
+                    "Reset_Attempt_Delete": [
+                      "Succeeded"
+                    ]
+                  }
+                },
+                "Reset_RetryRequests_Delete": {
+                  "type": "SetVariable",
+                  "inputs": {
+                    "name": "RetryRequests",
+                    "value": []
+                  },
+                  "runAfter": {
+                    "Reset_Aggregated_Delete": [
+                      "Succeeded"
+                    ]
+                  }
+                },
+                "Set_Pending_Initial_Delete": {
+                  "type": "SetVariable",
+                  "inputs": {
+                    "name": "PendingRequests",
+                    "value": "@variables('DeleteRequests')"
+                  },
+                  "runAfter": {
+                    "Reset_RetryRequests_Delete": [
+                      "Succeeded"
+                    ]
+                  }
+                },
+                "Check_Throttled_Remaining_Delete": {
+                  "type": "If",
+                  "expression": {
+                    "greater": [
+                      "@length(variables('RetryRequests'))",
+                      0
+                    ]
+                  },
+                  "actions": {
+                    "Select_Throttled_Delete": {
+                      "type": "Select",
+                      "inputs": {
+                        "from": "@variables('RetryRequests')",
+                        "select": {
+                          "requestId": "@item()?['id']",
+                          "phase": "delete-guest",
+                          "attempts": "@variables('RetryAttempt')",
+                          "reason": "Still throttled or unavailable after the final retry attempt"
+                        }
+                      }
+                    },
+                    "Record_Throttled_Delete": {
+                      "runAfter": {
+                        "Select_Throttled_Delete": [
+                          "Succeeded"
+                        ]
+                      },
+                      "type": "SetVariable",
+                      "inputs": {
+                        "name": "ThrottledUnprocessed",
+                        "value": "@union(variables('ThrottledUnprocessed'), body('Select_Throttled_Delete'))"
+                      }
+                    }
+                  },
+                  "else": {
+                    "actions": {}
+                  },
+                  "runAfter": {
+                    "Do_Until_Delete_Retry": [
+                      "Succeeded"
+                    ]
+                  }
                 }
               },
               "runAfter": {
                 "For_each_BatchResponse": [
-                  "Succeeded"
+                  "Succeeded",
+                  "Skipped",
+                  "Failed",
+                  "TimedOut"
                 ]
               },
               "else": {
@@ -751,81 +1050,13 @@
               "expression": "@and(not(parameters('ReportOnly')),greater(length(variables('DeleteRequests')),0))",
               "type": "If"
             },
-            "Check_Execute_DeleteBatch_Error": {
-              "actions": {
-                "Check_If_Rate_Limit_Delete": {
-                  "actions": {
-                    "Set_Rate_Limit_Delete": {
-                      "type": "SetVariable",
-                      "inputs": {
-                        "name": "HasRateLimit",
-                        "value": true
-                      }
-                    },
-                    "Set_Rate_Limit_Delete_Message": {
-                      "type": "SetVariable",
-                      "inputs": {
-                        "name": "ApiErrorMessage",
-                        "value": "@{concat('Rate limit during delete operations. Processed: ', string(variables('TotalProcessedUsers')), ', Deleted: ', string(variables('SuccessfulDeletes')))}"
-                      }
-                    }
-                  },
-                  "else": {
-                    "actions": {}
-                  },
-                  "expression": {
-                    "equals": [
-                      "@outputs('Execute_DeleteBatch')?['statusCode']",
-                      429
-                    ]
-                  },
-                  "type": "If"
-                }
-              },
+            "Set_RemainingMembers": {
               "runAfter": {
                 "Check_HasDeleteRequests": [
                   "Succeeded",
+                  "Skipped",
                   "Failed",
-                  "TimedOut",
-                  "Skipped"
-                ]
-              },
-              "else": {
-                "actions": {}
-              },
-              "expression": {
-                "and": [
-                  {
-                    "greater": [
-                      "@length(variables('DeleteRequests'))",
-                      0
-                    ]
-                  },
-                  {
-                    "not": {
-                      "equals": [
-                        "@parameters('ReportOnly')",
-                        true
-                      ]
-                    }
-                  },
-                  {
-                    "not": {
-                      "equals": [
-                        "@outputs('Execute_DeleteBatch')?['statusCode']",
-                        200
-                      ]
-                    }
-                  }
-                ]
-              },
-              "type": "If"
-            },
-            "Set_RemainingMembers": {
-              "runAfter": {
-                "Check_Execute_DeleteBatch_Error": [
-                  "Succeeded",
-                  "Skipped"
+                  "TimedOut"
                 ]
               },
               "type": "SetVariable",
@@ -844,6 +1075,391 @@
               "inputs": {
                 "name": "AllMembers",
                 "value": "@variables('RemainingMembers')"
+              }
+            },
+            "Do_Until_GetUserInfos_Retry": {
+              "type": "Until",
+              "expression": "@or(equals(length(variables('RetryRequests')), 0),greaterOrEquals(variables('RetryAttempt'), 5))",
+              "limit": {
+                "count": 5,
+                "timeout": "PT1H"
+              },
+              "actions": {
+                "Increment_Attempt_GetUserInfos": {
+                  "type": "IncrementVariable",
+                  "inputs": {
+                    "name": "RetryAttempt",
+                    "value": 1
+                  },
+                  "runAfter": {}
+                },
+                "Compose_Payload_GetUserInfos": {
+                  "type": "Compose",
+                  "inputs": {
+                    "requests": "@variables('PendingRequests')"
+                  },
+                  "runAfter": {
+                    "Increment_Attempt_GetUserInfos": [
+                      "Succeeded"
+                    ]
+                  }
+                },
+                "Filter_Success_GetUserInfos": {
+                  "type": "Query",
+                  "inputs": {
+                    "from": "@coalesce(body('GetUserInfosBatch')?['responses'], createArray())",
+                    "where": "@and(greaterOrEquals(item()?['status'], 200), less(item()?['status'], 400))"
+                  },
+                  "runAfter": {
+                    "GetUserInfosBatch": [
+                      "Succeeded"
+                    ]
+                  }
+                },
+                "Filter_Retryable_GetUserInfos": {
+                  "type": "Query",
+                  "inputs": {
+                    "from": "@coalesce(body('GetUserInfosBatch')?['responses'], createArray())",
+                    "where": "@or(equals(item()?['status'], 429), greaterOrEquals(item()?['status'], 500))"
+                  },
+                  "runAfter": {
+                    "Filter_Success_GetUserInfos": [
+                      "Succeeded"
+                    ]
+                  }
+                },
+                "Filter_ClientError_GetUserInfos": {
+                  "type": "Query",
+                  "inputs": {
+                    "from": "@coalesce(body('GetUserInfosBatch')?['responses'], createArray())",
+                    "where": "@and(and(greaterOrEquals(item()?['status'], 400), less(item()?['status'], 500)), not(equals(item()?['status'], 429)))"
+                  },
+                  "runAfter": {
+                    "Filter_Retryable_GetUserInfos": [
+                      "Succeeded"
+                    ]
+                  }
+                },
+                "Aggregate_Success_GetUserInfos": {
+                  "type": "SetVariable",
+                  "inputs": {
+                    "name": "AggregatedResponses",
+                    "value": "@union(variables('AggregatedResponses'), body('Filter_Success_GetUserInfos'))"
+                  },
+                  "runAfter": {
+                    "Filter_ClientError_GetUserInfos": [
+                      "Succeeded"
+                    ]
+                  }
+                },
+                "Select_ClientErrors_GetUserInfos": {
+                  "type": "Select",
+                  "inputs": {
+                    "from": "body('Filter_ClientError_GetUserInfos')",
+                    "select": {
+                      "requestId": "@item()?['id']",
+                      "status": "@item()?['status']",
+                      "errorCode": "@item()?['body']?['error']?['code']",
+                      "errorMessage": "@item()?['body']?['error']?['message']",
+                      "phase": "read-guest-attributes",
+                      "attempt": "@variables('RetryAttempt')"
+                    }
+                  },
+                  "runAfter": {
+                    "Aggregate_Success_GetUserInfos": [
+                      "Succeeded"
+                    ]
+                  }
+                },
+                "Record_ClientErrors_GetUserInfos": {
+                  "type": "SetVariable",
+                  "inputs": {
+                    "name": "ItemErrors",
+                    "value": "@union(variables('ItemErrors'), body('Select_ClientErrors_GetUserInfos'))"
+                  },
+                  "runAfter": {
+                    "Select_ClientErrors_GetUserInfos": [
+                      "Succeeded"
+                    ]
+                  }
+                },
+                "Select_Retry_Ids_GetUserInfos": {
+                  "type": "Select",
+                  "inputs": {
+                    "from": "body('Filter_Retryable_GetUserInfos')",
+                    "select": "@item()?['id']"
+                  },
+                  "runAfter": {
+                    "Record_ClientErrors_GetUserInfos": [
+                      "Succeeded"
+                    ]
+                  }
+                },
+                "Filter_Retry_Requests_GetUserInfos": {
+                  "type": "Query",
+                  "inputs": {
+                    "from": "@variables('PendingRequests')",
+                    "where": "@contains(body('Select_Retry_Ids_GetUserInfos'), item()?['id'])"
+                  },
+                  "runAfter": {
+                    "Select_Retry_Ids_GetUserInfos": [
+                      "Succeeded"
+                    ]
+                  }
+                },
+                "Select_RetryAfter_GetUserInfos": {
+                  "type": "Select",
+                  "inputs": {
+                    "from": "body('Filter_Retryable_GetUserInfos')",
+                    "select": "@int(coalesce(item()?['headers']?['Retry-After'], item()?['headers']?['retry-after'], '0'))"
+                  },
+                  "runAfter": {
+                    "Filter_Retry_Requests_GetUserInfos": [
+                      "Succeeded"
+                    ]
+                  }
+                },
+                "Set_RetryWait_GetUserInfos": {
+                  "type": "SetVariable",
+                  "inputs": {
+                    "name": "RetryWaitSeconds",
+                    "value": "@if(greater(max(union(body('Select_RetryAfter_GetUserInfos'), createArray(0))), 0),min(max(union(body('Select_RetryAfter_GetUserInfos'), createArray(0))), 300),30)"
+                  },
+                  "runAfter": {
+                    "Select_RetryAfter_GetUserInfos": [
+                      "Succeeded"
+                    ]
+                  }
+                },
+                "Set_RetryRequests_GetUserInfos": {
+                  "type": "SetVariable",
+                  "inputs": {
+                    "name": "RetryRequests",
+                    "value": "@body('Filter_Retry_Requests_GetUserInfos')"
+                  },
+                  "runAfter": {
+                    "Set_RetryWait_GetUserInfos": [
+                      "Succeeded"
+                    ]
+                  }
+                },
+                "Set_Pending_Next_GetUserInfos": {
+                  "type": "SetVariable",
+                  "inputs": {
+                    "name": "PendingRequests",
+                    "value": "@variables('RetryRequests')"
+                  },
+                  "runAfter": {
+                    "Set_RetryRequests_GetUserInfos": [
+                      "Succeeded"
+                    ]
+                  }
+                },
+                "Check_Should_Wait_GetUserInfos": {
+                  "type": "If",
+                  "expression": {
+                    "and": [
+                      {
+                        "greater": [
+                          "@length(variables('RetryRequests'))",
+                          0
+                        ]
+                      },
+                      {
+                        "less": [
+                          "@variables('RetryAttempt')",
+                          5
+                        ]
+                      }
+                    ]
+                  },
+                  "actions": {
+                    "Wait_RetryAfter_GetUserInfos": {
+                      "type": "Wait",
+                      "inputs": {
+                        "interval": {
+                          "count": "@variables('RetryWaitSeconds')",
+                          "unit": "Second"
+                        }
+                      }
+                    }
+                  },
+                  "else": {
+                    "actions": {}
+                  },
+                  "runAfter": {
+                    "Set_Pending_Next_GetUserInfos": [
+                      "Succeeded"
+                    ]
+                  }
+                },
+                "GetUserInfosBatch": {
+                  "type": "Http",
+                  "inputs": {
+                    "uri": "https://graph.microsoft.com/beta/$batch",
+                    "method": "POST",
+                    "body": "@outputs('Compose_Payload_GetUserInfos')",
+                    "authentication": {
+                      "type": "ManagedServiceIdentity",
+                      "audience": "https://graph.microsoft.com"
+                    },
+                    "retryPolicy": {
+                      "type": "exponential",
+                      "count": 3,
+                      "interval": "PT20S"
+                    }
+                  },
+                  "runAfter": {
+                    "Compose_Payload_GetUserInfos": [
+                      "Succeeded"
+                    ]
+                  }
+                },
+                "Check_GetUserInfosBatch_Error": {
+                  "actions": {
+                    "Check_If_Rate_Limit": {
+                      "actions": {
+                        "Set_Rate_Limit_Flag": {
+                          "type": "SetVariable",
+                          "inputs": {
+                            "name": "HasRateLimit",
+                            "value": true
+                          }
+                        },
+                        "Set_Rate_Limit_Error": {
+                          "type": "SetVariable",
+                          "inputs": {
+                            "name": "ApiErrorMessage",
+                            "value": "@{concat('Graph API rate limit reached after processing ', string(variables('TotalProcessedUsers')), ' users.')}"
+                          }
+                        }
+                      },
+                      "else": {
+                        "actions": {}
+                      },
+                      "expression": {
+                        "equals": [
+                          "@outputs('GetUserInfosBatch')?['statusCode']",
+                          429
+                        ]
+                      },
+                      "type": "If"
+                    }
+                  },
+                  "runAfter": {
+                    "Check_Should_Wait_GetUserInfos": [
+                      "Succeeded"
+                    ]
+                  },
+                  "else": {
+                    "actions": {}
+                  },
+                  "expression": {
+                    "not": {
+                      "equals": [
+                        "@outputs('GetUserInfosBatch')?['statusCode']",
+                        200
+                      ]
+                    }
+                  },
+                  "type": "If"
+                }
+              },
+              "runAfter": {
+                "Set_Pending_Initial_GetUserInfos": [
+                  "Succeeded"
+                ]
+              }
+            },
+            "Reset_Attempt_GetUserInfos": {
+              "type": "SetVariable",
+              "inputs": {
+                "name": "RetryAttempt",
+                "value": 0
+              },
+              "runAfter": {
+                "Select_BatchRequests": [
+                  "Succeeded"
+                ]
+              }
+            },
+            "Reset_Aggregated_GetUserInfos": {
+              "type": "SetVariable",
+              "inputs": {
+                "name": "AggregatedResponses",
+                "value": []
+              },
+              "runAfter": {
+                "Reset_Attempt_GetUserInfos": [
+                  "Succeeded"
+                ]
+              }
+            },
+            "Reset_RetryRequests_GetUserInfos": {
+              "type": "SetVariable",
+              "inputs": {
+                "name": "RetryRequests",
+                "value": []
+              },
+              "runAfter": {
+                "Reset_Aggregated_GetUserInfos": [
+                  "Succeeded"
+                ]
+              }
+            },
+            "Set_Pending_Initial_GetUserInfos": {
+              "type": "SetVariable",
+              "inputs": {
+                "name": "PendingRequests",
+                "value": "@body('Select_BatchRequests')"
+              },
+              "runAfter": {
+                "Reset_RetryRequests_GetUserInfos": [
+                  "Succeeded"
+                ]
+              }
+            },
+            "Check_Throttled_Remaining_GetUserInfos": {
+              "type": "If",
+              "expression": {
+                "greater": [
+                  "@length(variables('RetryRequests'))",
+                  0
+                ]
+              },
+              "actions": {
+                "Select_Throttled_GetUserInfos": {
+                  "type": "Select",
+                  "inputs": {
+                    "from": "@variables('RetryRequests')",
+                    "select": {
+                      "requestId": "@item()?['id']",
+                      "phase": "read-guest-attributes",
+                      "attempts": "@variables('RetryAttempt')",
+                      "reason": "Still throttled or unavailable after the final retry attempt"
+                    }
+                  }
+                },
+                "Record_Throttled_GetUserInfos": {
+                  "runAfter": {
+                    "Select_Throttled_GetUserInfos": [
+                      "Succeeded"
+                    ]
+                  },
+                  "type": "SetVariable",
+                  "inputs": {
+                    "name": "ThrottledUnprocessed",
+                    "value": "@union(variables('ThrottledUnprocessed'), body('Select_Throttled_GetUserInfos'))"
+                  }
+                }
+              },
+              "else": {
+                "actions": {}
+              },
+              "runAfter": {
+                "Do_Until_GetUserInfos_Retry": [
+                  "Succeeded"
+                ]
               }
             }
           },
@@ -957,14 +1573,19 @@
           "usersDeleted": "@length(variables('DeletedUsersReport'))",
           "successfulDeletes": "@variables('SuccessfulDeletes')",
           "guestSourceGroupId": "@parameters('guestSourceGroupId')",
-          "failedDeletes": "@variables('FailedDeletes')"
+          "failedDeletes": "@variables('FailedDeletes')",
+          "throttledUnprocessedCount": "@length(variables('ThrottledUnprocessed'))",
+          "itemErrorCount": "@length(variables('ItemErrors'))"
         },
         "summary": {
           "totalMarkedUsersFound": "@length(variables('DeletedUsersReport'))",
           "accountsDeleted": "@if(parameters('ReportOnly'),0,variables('SuccessfulDeletes'))",
           "reportOnlyMode": "@parameters('ReportOnly')",
           "failedDeletesCount": "@length(variables('FailedDeletes'))",
-          "message": "@if(equals(length(variables('DeletedUsersReport')),0),'No users found for deletion.', concat(string(length(variables('DeletedUsersReport'))), ' users processed for deletion'))"
+          "message": "@if(equals(length(variables('DeletedUsersReport')),0),'No users found for deletion.', concat(string(length(variables('DeletedUsersReport'))), ' users processed for deletion'))",
+          "throttledUnprocessedCount": "@length(variables('ThrottledUnprocessed'))",
+          "errorCount": "@length(variables('ItemErrors'))",
+          "warnings": "@union(if(greater(length(variables('ThrottledUnprocessed')), 0),createArray(concat(string(length(variables('ThrottledUnprocessed'))),' request(s) were still throttled after ', string(5),' attempts and were NOT processed this run. See throttledUnprocessed.')),createArray()),if(greater(length(variables('ItemErrors')), 0),createArray(concat(string(length(variables('ItemErrors'))),' request(s) failed with a non-retryable error. See errors.')),createArray()))"
         },
         "deletedUsers": "@variables('DeletedUsersReport')",
         "failedDeletes": "@variables('FailedDeletes')",
@@ -974,7 +1595,128 @@
           "deletionThresholdDays": "@parameters('DeletionThresholdDays')",
           "batchSize": "@parameters('BatchSize')",
           "guestSourceGroupId": "@parameters('guestSourceGroupId')"
-        }
+        },
+        "throttledUnprocessed": "@variables('ThrottledUnprocessed')",
+        "errors": "@variables('ItemErrors')"
+      }
+    },
+    "Initialize_PendingRequests": {
+      "type": "InitializeVariable",
+      "inputs": {
+        "variables": [
+          {
+            "name": "PendingRequests",
+            "type": "array",
+            "value": []
+          }
+        ]
+      },
+      "runAfter": {
+        "Initialize_FailedDeletes": [
+          "Succeeded"
+        ]
+      }
+    },
+    "Initialize_AggregatedResponses": {
+      "type": "InitializeVariable",
+      "inputs": {
+        "variables": [
+          {
+            "name": "AggregatedResponses",
+            "type": "array",
+            "value": []
+          }
+        ]
+      },
+      "runAfter": {
+        "Initialize_PendingRequests": [
+          "Succeeded"
+        ]
+      }
+    },
+    "Initialize_RetryRequests": {
+      "type": "InitializeVariable",
+      "inputs": {
+        "variables": [
+          {
+            "name": "RetryRequests",
+            "type": "array",
+            "value": []
+          }
+        ]
+      },
+      "runAfter": {
+        "Initialize_AggregatedResponses": [
+          "Succeeded"
+        ]
+      }
+    },
+    "Initialize_RetryAttempt": {
+      "type": "InitializeVariable",
+      "inputs": {
+        "variables": [
+          {
+            "name": "RetryAttempt",
+            "type": "integer",
+            "value": 0
+          }
+        ]
+      },
+      "runAfter": {
+        "Initialize_RetryRequests": [
+          "Succeeded"
+        ]
+      }
+    },
+    "Initialize_RetryWaitSeconds": {
+      "type": "InitializeVariable",
+      "inputs": {
+        "variables": [
+          {
+            "name": "RetryWaitSeconds",
+            "type": "integer",
+            "value": 30
+          }
+        ]
+      },
+      "runAfter": {
+        "Initialize_RetryAttempt": [
+          "Succeeded"
+        ]
+      }
+    },
+    "Initialize_ThrottledUnprocessed": {
+      "type": "InitializeVariable",
+      "inputs": {
+        "variables": [
+          {
+            "name": "ThrottledUnprocessed",
+            "type": "array",
+            "value": []
+          }
+        ]
+      },
+      "runAfter": {
+        "Initialize_RetryWaitSeconds": [
+          "Succeeded"
+        ]
+      }
+    },
+    "Initialize_ItemErrors": {
+      "type": "InitializeVariable",
+      "inputs": {
+        "variables": [
+          {
+            "name": "ItemErrors",
+            "type": "array",
+            "value": []
+          }
+        ]
+      },
+      "runAfter": {
+        "Initialize_ThrottledUnprocessed": [
+          "Succeeded"
+        ]
       }
     }
   }
