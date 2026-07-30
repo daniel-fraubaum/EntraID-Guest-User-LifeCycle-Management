@@ -4,7 +4,7 @@
 # Logic Apps (via main.bicep), and the Microsoft Graph app roles their managed
 # identities need.
 #
-# Everything here is idempotent — re-running converges rather than duplicating.
+# Everything here is idempotent - re-running converges rather than duplicating.
 # Directory writes (managed identity service principals, app role assignments)
 # replicate asynchronously, so every directory lookup and the role assignment
 # itself are retried RETRY_ATTEMPTS times with RETRY_WAIT_SECONDS between tries.
@@ -105,7 +105,7 @@ script_dir="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)"
 
 # --- retry helpers -----------------------------------------------------------
 
-# retry <description> <command...> — echoes stdout of the first successful run.
+# retry <description> <command...> - echoes stdout of the first successful run.
 retry() {
   local description="$1"; shift
   local attempt=1 output=''
@@ -122,7 +122,7 @@ retry() {
   return 1
 }
 
-# retry_nonempty <description> <command...> — as retry, but an empty result also
+# retry_nonempty <description> <command...> - as retry, but an empty result also
 # counts as failure. This is what makes directory propagation tolerable: a
 # lookup that succeeds with an empty body is retried instead of being passed on
 # as an empty id.
@@ -146,7 +146,7 @@ retry_nonempty() {
 
 require_id() {
   local label="$1" value="$2"
-  [[ -n ${value// /} && $value != 'null' ]] || die "${label} is empty — refusing to call the API with an empty id."
+  [[ -n ${value// /} && $value != 'null' ]] || die "${label} is empty - refusing to call the API with an empty id."
 }
 
 # --- subscription ------------------------------------------------------------
@@ -278,7 +278,7 @@ assign_graph_roles() {
         || die "Could not read existing app role assignments for ${principal}."
 
       if [[ -n ${existing// /} && $existing != 'null' ]]; then
-        info "${principal} already has ${role} — skipping."
+        info "${principal} already has ${role} - skipping."
         continue
       fi
 

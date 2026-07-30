@@ -6,7 +6,7 @@
 
 .DESCRIPTION
     PowerShell counterpart of deploy.sh with identical behaviour and switches.
-    Everything is idempotent — re-running converges rather than duplicating.
+    Everything is idempotent - re-running converges rather than duplicating.
     Directory writes (managed identity service principals, app role assignments)
     replicate asynchronously, so every directory lookup and the role assignment
     itself is retried $RetryAttempts times with $RetryWaitSeconds between tries.

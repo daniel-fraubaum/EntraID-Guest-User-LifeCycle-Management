@@ -178,7 +178,7 @@ def print_results(payload, max_results, chars):
     try:
         results = json.loads(payload).get("results", [])
     except (json.JSONDecodeError, AttributeError):
-        # Not the documented {"results": [...]} envelope — show it verbatim.
+        # Not the documented {"results": [...]} envelope - show it verbatim.
         print(_clip(payload, chars))
         return 1 if payload.strip() else 0
 

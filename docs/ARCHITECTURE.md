@@ -40,7 +40,7 @@ Two Entra ID dynamic security groups serve as input scopes for the Logic Apps:
 | Group | Membership Rule | Purpose |
 |-------|----------------|---------|
 | `GRP_SEC_GuestUserLCM_AllGuests` | `(user.userType -eq "Guest") and (user.extensionAttribute15 -ne "ExcludeFromLCM") and (user.accountEnabled -eq true)` | Contains all active guest users eligible for evaluation. |
-| `GRP_SEC_GuestUserLCM_EligibleForRemoval` | `(user.extensionAttribute14 -eq "MarkedEligibleforRemoval") and (user.accountEnabled -eq false)` | Contains guests already marked and disabled — awaiting deletion. |
+| `GRP_SEC_GuestUserLCM_EligibleForRemoval` | `(user.extensionAttribute14 -eq "MarkedEligibleforRemoval") and (user.accountEnabled -eq false)` | Contains guests already marked and disabled - awaiting deletion. |
 
 The groups update automatically as user attributes change, creating a seamless handoff between the two Logic Apps.
 
@@ -53,7 +53,7 @@ Two on-premises extension attributes drive the lifecycle state machine:
 | `extensionAttribute14` | `"MarkedEligibleforRemoval"` | Lifecycle flag indicating the user has been identified as inactive. |
 | `extensionAttribute15` | UTC timestamp (e.g., `2025-06-15T01:00:00Z`) or `"ExcludeFromLCM"` | Dual-purpose: stores the marking timestamp for grace period calculation, or permanently excludes a user from lifecycle processing. |
 
-### Logic App 1 — Mark Guests Eligible for Removal
+### Logic App 1 - Mark Guests Eligible for Removal
 
 **Trigger:** Weekly recurrence (default: Sunday, 01:00 UTC)
 
@@ -121,10 +121,10 @@ Initialize Variables
 
 - Uses Microsoft Graph **batch API** (`/beta/$batch`) to minimize API calls and stay within rate limits.
 - Evaluates both `lastSuccessfulSignInDateTime` and `lastSignInDateTime` (with fallback via `coalesce`) to determine the most recent sign-in.
-- Users who have **never signed in** are evaluated by comparing `createdDateTime` against the threshold — if they were created before the threshold date, they are considered inactive.
+- Users who have **never signed in** are evaluated by comparing `createdDateTime` against the threshold - if they were created before the threshold date, they are considered inactive.
 - Already-disabled accounts (`accountEnabled = false`) are skipped to avoid re-processing.
 
-### Logic App 2 — Delete Guests After Grace Period
+### Logic App 2 - Delete Guests After Grace Period
 
 **Trigger:** Weekly recurrence (default: Sunday, 03:00 UTC)
 
@@ -261,9 +261,9 @@ Both Logic Apps implement a layered error handling approach:
 
 Both Logic Apps use the Microsoft Graph **JSON batching** endpoint (`/beta/$batch`) to group multiple API calls into a single HTTP request:
 
-1. **Member retrieval** — Paginated with `$top=999` and `@odata.nextLink` handling.
-2. **User detail queries** — Batched in groups of `BatchSize` (default: 20, max: 100).
-3. **Write/delete operations** — Batched PATCH (disable) or DELETE requests in the same batch size.
+1. **Member retrieval** - Paginated with `$top=999` and `@odata.nextLink` handling.
+2. **User detail queries** - Batched in groups of `BatchSize` (default: 20, max: 100).
+3. **Write/delete operations** - Batched PATCH (disable) or DELETE requests in the same batch size.
 
 This approach significantly reduces the number of HTTP round-trips and helps stay within Microsoft Graph API rate limits.
 

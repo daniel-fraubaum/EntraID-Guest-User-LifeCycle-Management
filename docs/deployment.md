@@ -5,7 +5,7 @@ ID guest lifecycle: **Mark** (find inactive guests, tag + disable them) and
 **Delete** (remove tagged guests after a grace period).
 
 ```
-workflows/                                  Workflow definitions — source of truth for behaviour
+workflows/                                  Workflow definitions - source of truth for behaviour
   mark-guests-eligible-for-removal.json
   delete-guests-after-grace-period.json
 infra/
@@ -17,14 +17,14 @@ infra/
 ```
 
 The Bicep template creates the workflows and their managed identities. It cannot
-grant Microsoft Graph app roles — those are directory objects, not ARM
-resources — so the deploy scripts do that as a second step.
+grant Microsoft Graph app roles - those are directory objects, not ARM
+resources - so the deploy scripts do that as a second step.
 
 ---
 
 ## Prerequisites
 
-### Licensing — required, not optional
+### Licensing - required, not optional
 
 > **Reading `signInActivity` requires a Microsoft Entra ID P1 or P2 license in
 > the tenant.** The Mark workflow decides who is inactive from
@@ -41,7 +41,7 @@ Microsoft Graph. `deploy.sh` / `deploy.ps1` assign all three to both identities.
 
 | App role | Why it is needed | Required |
 | --- | --- | --- |
-| `AuditLog.Read.All` | Gates the `signInActivity` property. Without it, Graph omits it. | Yes — the solution cannot work without it |
+| `AuditLog.Read.All` | Gates the `signInActivity` property. Without it, Graph omits it. | Yes - the solution cannot work without it |
 | `User.ReadWrite.All` | Patch `accountEnabled` + extension attributes (Mark), `DELETE /users/{id}` (Delete) | Yes |
 | `GroupMember.Read.All` | Enumerate `/groups/{id}/members` to get the users to evaluate | Yes for group-scoped operation, which is how both workflows are written |
 
@@ -51,10 +51,10 @@ different way.
 ### Tooling and rights
 
 - **Azure CLI**, logged in (`az login`) against the target subscription.
-- **jq** — used by `deploy.sh` (preinstalled in Azure Cloud Shell). Not needed by `deploy.ps1`.
-- **Bicep** — bundled with recent Azure CLI; `az bicep install` if missing.
+- **jq** - used by `deploy.sh` (preinstalled in Azure Cloud Shell). Not needed by `deploy.ps1`.
+- **Bicep** - bundled with recent Azure CLI; `az bicep install` if missing.
 - Azure RBAC: **Contributor** on the target subscription or resource group.
-- Entra ID: **Privileged Role Administrator** or **Global Administrator** — granting
+- Entra ID: **Privileged Role Administrator** or **Global Administrator** - granting
   Graph app roles to a managed identity requires it. A Contributor alone will get
   through the Bicep deployment and then fail on role assignment.
 
@@ -73,18 +73,18 @@ Extension attributes used:
 | Attribute | Direction | Meaning |
 | --- | --- | --- |
 | `extensionAttribute13` | **read only** | Approved access end date, written by VouchGate. A parseable `yyyy-MM-dd` in the past marks the guest with `reasonCode: expiry`. Empty, null and unparseable values are treated as "no expiry set" and never mark. |
-| `extensionAttribute14` | written by Mark, read by Delete | Lifecycle flag, always the literal `MarkedEligibleforRemoval` regardless of which of the three reasons fired — the Delete workflow gates on exact equality, so a reason-specific value would break the handoff. |
+| `extensionAttribute14` | written by Mark, read by Delete | Lifecycle flag, always the literal `MarkedEligibleforRemoval` regardless of which of the three reasons fired - the Delete workflow gates on exact equality, so a reason-specific value would break the handoff. |
 | `extensionAttribute15` | written by Mark, read by Delete and by the group rule | Mark timestamp **and** exclusion sentinel. See [Exclusion](#exclusion-enforced-by-the-group-not-the-workflow). |
 
 `extensionAttribute14` and `extensionAttribute15` must be free for this solution's
-use in your tenant. `extensionAttribute13` must be free *or* owned by VouchGate —
+use in your tenant. `extensionAttribute13` must be free *or* owned by VouchGate -
 this solution only reads it.
 
 ---
 
 ## Quickstart
 
-Both scripts are idempotent — re-run them freely. Both default to
+Both scripts are idempotent - re-run them freely. Both default to
 `ReportOnly = true`, so a first deployment cannot disable or delete anything.
 
 ### Linux, macOS, Azure Cloud Shell
@@ -125,7 +125,7 @@ when it finishes.
 ### What the scripts do
 
 1. Create the resource group if it does not exist.
-2. Deploy `infra/main.bicep` — both workflows, each with a system-assigned managed identity.
+2. Deploy `infra/main.bicep` - both workflows, each with a system-assigned managed identity.
 3. Read both managed identity object IDs from the deployment outputs.
 4. Wait for those identities to appear in the directory, then assign the Graph app roles to **both**, skipping any already present.
 
@@ -195,7 +195,7 @@ Each run ends with a Compose action holding the full JSON report:
 
 **Portal:** Logic App → **Run history** → newest run → the report action → **Outputs**.
 
-**CLI** — newest run's status, then that action's output:
+**CLI** - newest run's status, then that action's output:
 
 ```bash
 BASE="https://management.azure.com/subscriptions/${SUBSCRIPTION_ID}/resourceGroups/${RESOURCE_GROUP}/providers/Microsoft.Logic/workflows/${WORKFLOW}"
@@ -210,26 +210,26 @@ az rest --method GET \
 
 What to check in the report before going live:
 
-- `reportMetadata.mode` is `Report Only` — proof nothing was changed.
+- `reportMetadata.mode` is `Report Only` - proof nothing was changed.
 - `reportMetadata.totalMembersFound` is non-zero. Zero means the dynamic group is empty or unreadable, not that every guest is active.
 - `summary.totalAffectedUsers` is plausible for your tenant. A surprisingly high number usually means the threshold is too aggressive or `signInActivity` is missing (see troubleshooting).
-- **`affectedUsers[].reasonCode`** — every entry carries one of `inactivity`,
+- **`affectedUsers[].reasonCode`** - every entry carries one of `inactivity`,
   `never-signed-in` or `expiry`. Check the mix:
   - a large `expiry` count usually means `extensionAttribute13` was backfilled with historical dates;
   - a large `never-signed-in` count with recent `createdDateTime` values means `newAccountGraceDays` is too low for your invitation flow;
-  - everything landing in `inactivity` with `lastSignIn: null` means `signInActivity` is not being returned at all — check licensing and `AuditLog.Read.All`.
-- `affectedUsers[]` — spot-check a few UPNs by hand against the Entra ID sign-in logs.
+  - everything landing in `inactivity` with `lastSignIn: null` means `signInActivity` is not being returned at all - check licensing and `AuditLog.Read.All`.
+- `affectedUsers[]` - spot-check a few UPNs by hand against the Entra ID sign-in logs.
 
 The three reasons are mutually exclusive by construction, so a guest appears at
 most once per run and produces at most one disable request.
 
-Also check the three bookkeeping sections — they are always present and empty when
+Also check the three bookkeeping sections - they are always present and empty when
 nothing applies:
 
-- **`summary.warnings[]`** — read this first. Non-empty means some work did not complete.
-- **`throttledUnprocessed[]`** — requests still `429`/`5xx` after 5 attempts. Those guests were **not** evaluated or **not** disabled this run. The next scheduled run retries them; a consistently non-empty list means `batchSize` is too aggressive for your tenant.
-- **`errors[]`** — per-item `4xx` other than `429`. A `403` here means a missing Graph app role; a `404` usually means the guest was deleted between enumeration and evaluation and is benign.
-- **`excluded[]`** (Mark only) — guests skipped because `extensionAttribute15` is `ExcludeFromLCM`. Seeing entries here is the guard working, not a problem.
+- **`summary.warnings[]`** - read this first. Non-empty means some work did not complete.
+- **`throttledUnprocessed[]`** - requests still `429`/`5xx` after 5 attempts. Those guests were **not** evaluated or **not** disabled this run. The next scheduled run retries them; a consistently non-empty list means `batchSize` is too aggressive for your tenant.
+- **`errors[]`** - per-item `4xx` other than `429`. A `403` here means a missing Graph app role; a `404` usually means the guest was deleted between enumeration and evaluation and is benign.
+- **`excluded[]`** (Mark only) - guests skipped because `extensionAttribute15` is `ExcludeFromLCM`. Seeing entries here is the guard working, not a problem.
 
 ### 3. Go live
 
@@ -252,23 +252,23 @@ Set on `infra/main.bicep`; each is passed through to the corresponding workflow 
 
 | Bicep parameter | Workflow parameter | Default | Applies to | Meaning |
 | --- | --- | --- | --- | --- |
-| `allGuestsGroupId` | `guestSourceGroupId` | — | Mark | Object ID of the All Guests group |
-| `eligibleForRemovalGroupId` | `guestSourceGroupId` | — | Delete | Object ID of the Eligible For Removal group |
+| `allGuestsGroupId` | `guestSourceGroupId` | - | Mark | Object ID of the All Guests group |
+| `eligibleForRemovalGroupId` | `guestSourceGroupId` | - | Delete | Object ID of the Eligible For Removal group |
 | `inactivityThresholdDays` | `InactivityThresholdDays` | `180` | Mark | Days since last sign-in before a guest is marked |
 | `deletionThresholdDays` | `DeletionThresholdDays` | `30` | Delete | Days after marking before deletion |
 | `newAccountGraceDays` | `NewAccountGraceDays` | `30` | Mark | Minimum account age before a never-signed-in guest may be marked. **Additional** to `inactivityThresholdDays`, not a replacement |
 | `reportOnly` | `ReportOnly` | `true` | Both | Dry run. Nothing is disabled or deleted while true |
-| `batchSize` | `BatchSize` | `20` | Both | Users per Graph `$batch` request (1–100) |
-| `workflowState` | — | `Enabled` | Both | `Disabled` deploys the workflows without arming the schedule |
+| `batchSize` | `BatchSize` | `20` | Both | Users per Graph `$batch` request (1-100) |
+| `workflowState` | - | `Enabled` | Both | `Disabled` deploys the workflows without arming the schedule |
 
-Every declared workflow parameter is now read by the definitions — there are no
+Every declared workflow parameter is now read by the definitions - there are no
 inert parameters. Two notes on semantics:
 
 - **`newAccountGraceDays` is a guard, not a switch.** A never-signed-in guest must
   be older than `inactivityThresholdDays` **and** older than `newAccountGraceDays`.
   With the defaults (`180` / `30`) the 180-day threshold binds and behaviour is
   identical to before this parameter was wired. The grace period only becomes the
-  binding constraint when it exceeds `inactivityThresholdDays` — which is the case
+  binding constraint when it exceeds `inactivityThresholdDays` - which is the case
   it exists for, since email-invited guests may have no sign-in for weeks before
   first redemption. If you lower `inactivityThresholdDays` to, say, 14 days, raise
   `newAccountGraceDays` to keep fresh invitations safe.
@@ -286,7 +286,7 @@ membership rule* of the source group:
 An excluded guest is not a member of `GRP_SEC_GuestUserLCM_AllGuests`, so the Mark
 workflow never enumerates it and never evaluates it. The workflow processes
 whatever the group hands it. Changing the sentinel value `"ExcludeFromLCM"` means
-editing that membership rule — nothing in `infra/` or `workflows/` reads it, which
+editing that membership rule - nothing in `infra/` or `workflows/` reads it, which
 is why it is not exposed as a parameter.
 
 ### `extensionAttribute15` carries two meanings
@@ -297,14 +297,14 @@ workable but it can collide:
 | Situation | Outcome |
 | --- | --- |
 | Excluded *before* ever being marked | Safe. Never in the group → never evaluated → the flag survives. |
-| Excluded *after* being marked | The mark timestamp is replaced by `"ExcludeFromLCM"`. The Delete workflow compares that value against a threshold date, and `"ExcludeFromLCM"` sorts after any ISO date, so the guest is **not** deleted. Exclusion wins — the safe direction. |
+| Excluded *after* being marked | The mark timestamp is replaced by `"ExcludeFromLCM"`. The Delete workflow compares that value against a threshold date, and `"ExcludeFromLCM"` sorts after any ISO date, so the guest is **not** deleted. Exclusion wins - the safe direction. |
 | Excluded but still in the group, because dynamic membership has not re-evaluated | **Safe since v2.0.0.** See the guard below. |
 
 ### Second line of defence: the in-workflow guard
 
 Dynamic group membership is not instantaneous, so the Mark workflow does not rely
 on the group alone. It checks `extensionAttribute15` on every guest it evaluates
-and skips any whose value is `ExcludeFromLCM` — never marking, never disabling —
+and skips any whose value is `ExcludeFromLCM` - never marking, never disabling -
 regardless of how that guest ended up in the group. The comparison is
 case-insensitive and whitespace-trimmed, so `excludefromlcm` and
 `" ExcludeFromLCM "` are both honoured; the dynamic membership rule itself is a
@@ -318,7 +318,7 @@ timestamp; that can no longer happen.
 
 The guard protects the *sentinel value*, not the field. If `extensionAttribute15`
 holds anything other than `ExcludeFromLCM`, marking still overwrites it with a
-timestamp. Keep the field dedicated to this solution — and if you need an
+timestamp. Keep the field dedicated to this solution - and if you need an
 exclusion the workflow can never touch, point the membership rule at a different
 unused `extensionAttribute` instead. That is a change to the rule and the
 prerequisites, not to the workflows.
@@ -332,7 +332,7 @@ prerequisites, not to the workflows.
 | Run fails `403 Forbidden` on the first Graph call | App roles not assigned, or assigned after the run started | `./infra/deploy.sh --resource-group RG --skip-infra`, then re-trigger |
 | `Failed to assign <role>` at the end of deployment | Your account lacks Privileged Role Administrator / Global Administrator | Have an eligible admin re-run with `--skip-infra` |
 | `Managed identity … is not visible in the directory yet` | Identity has not replicated within 5 × 15 s | Wait a few minutes, re-run with `--skip-infra` |
-| Report shows every guest as never-signed-in | `signInActivity` is absent — missing P1/P2 license or `AuditLog.Read.All` | Verify tenant licensing, then confirm the role assignment on **both** identities |
+| Report shows every guest as never-signed-in | `signInActivity` is absent - missing P1/P2 license or `AuditLog.Read.All` | Verify tenant licensing, then confirm the role assignment on **both** identities |
 | `totalMembersFound: 0` | Group ID wrong, group empty, or `GroupMember.Read.All` missing | Check the object ID; confirm membership in the Portal; re-run role assignment |
 | Users marked but never deleted | Delete workflow still in report-only, grace period not elapsed, or the user is not in the Eligible group | Check `ReportOnly`, `extensionAttribute15` age vs `deletionThresholdDays`, and that `accountEnabled = false` |
 | Guests marked `reasonCode: expiry` unexpectedly | `extensionAttribute13` holds historical dates, e.g. from a backfill | Inspect the `accessExpiredOn` values in the report; clear or correct the attribute before leaving report-only |
@@ -344,7 +344,7 @@ prerequisites, not to the workflows.
 | `errors[]` contains `403` entries | A Graph app role is missing on that workflow's managed identity | `./infra/deploy.sh --resource-group RG --skip-infra` |
 | `errors[]` contains `404` entries | Guest was deleted between enumeration and evaluation | Benign; no action |
 | An excluded guest appears in `excluded[]` | The in-workflow guard caught a guest that was still in the source group | Expected during dynamic-membership lag; the guard prevented the mark |
-| Deployment fails: `expected value of type … 36` | A group ID is empty or not a GUID | Pass real object IDs — `main.bicep` rejects malformed ones rather than deploying a broken workflow |
+| Deployment fails: `expected value of type … 36` | A group ID is empty or not a GUID | Pass real object IDs - `main.bicep` rejects malformed ones rather than deploying a broken workflow |
 | `deploy.sh: jq not found` | jq missing | Install jq, or use `deploy.ps1`, or run in Azure Cloud Shell |
 | Delete run reports failures with status 404 | User already deleted, e.g. by a concurrent run | Harmless. Since v2.0.0 these land in `errors[]` rather than `failedDeletes[]`, and no longer fail the run |
 
@@ -352,7 +352,7 @@ prerequisites, not to the workflows.
 
 ## Sources
 
-- [List users — sign-in activity example, permissions and paging limits](https://learn.microsoft.com/graph/api/user-list?view=graph-rest-1.0#examples)
-- [How to detect and investigate inactive user accounts — P1/P2 requirement](https://learn.microsoft.com/entra/identity/monitoring-health/howto-manage-inactive-user-accounts)
-- [Access Microsoft Graph from a secured app as the app — granting app roles to a managed identity](https://learn.microsoft.com/entra/identity-platform/multi-service-web-app-access-microsoft-graph-as-app#grant-access-to-microsoft-graph)
+- [List users - sign-in activity example, permissions and paging limits](https://learn.microsoft.com/graph/api/user-list?view=graph-rest-1.0#examples)
+- [How to detect and investigate inactive user accounts - P1/P2 requirement](https://learn.microsoft.com/entra/identity/monitoring-health/howto-manage-inactive-user-accounts)
+- [Access Microsoft Graph from a secured app as the app - granting app roles to a managed identity](https://learn.microsoft.com/entra/identity-platform/multi-service-web-app-access-microsoft-graph-as-app#grant-access-to-microsoft-graph)
 - [Microsoft.Logic/workflows/triggers](https://learn.microsoft.com/azure/templates/microsoft.logic/workflows/triggers)
