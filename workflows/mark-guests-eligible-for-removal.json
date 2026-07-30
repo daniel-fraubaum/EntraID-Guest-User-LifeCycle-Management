@@ -18,10 +18,6 @@
       "type": "Bool",
       "defaultValue": true
     },
-    "ExcludeFlagValue": {
-      "type": "String",
-      "defaultValue": "ExcludeFromLCM"
-    },
     "BatchSize": {
       "type": "Int",
       "defaultValue": 20
@@ -63,7 +59,7 @@
     },
     "Initialize_Report_Array": {
       "runAfter": {
-        "Initialize_Threshold": [
+        "Initialize_GraceThreshold": [
           "Succeeded"
         ]
       },
@@ -544,7 +540,7 @@
                 "select": {
                   "id": "@item()?['id']",
                   "method": "GET",
-                  "url": "@concat('/users/', item()?['id'], '?$select=id,displayName,userPrincipalName,mail,externalUserState,createdDateTime,signInActivity,accountEnabled')"
+                  "url": "@concat('/users/', item()?['id'], '?$select=id,displayName,userPrincipalName,mail,externalUserState,createdDateTime,signInActivity,accountEnabled,onPremisesExtensionAttributes')"
                 }
               }
             },
@@ -726,7 +722,8 @@
                                   "daysSinceLastSignIn": "@div(sub(ticks(utcNow()), ticks(outputs('Evaluate_SignIn_Status')?['lastSignIn'])), 864000000000)",
                                   "reason": "Inactive - Last sign-in before threshold",
                                   "actionTaken": "@if(parameters('ReportOnly'),'REPORT ONLY','DISABLED')",
-                                  "timestamp": "@utcNow()"
+                                  "timestamp": "@utcNow()",
+                                  "reasonCode": "inactivity"
                                 }
                               }
                             },
@@ -772,7 +769,7 @@
                             }
                           },
                           "runAfter": {
-                            "Evaluate_SignIn_Status": [
+                            "Evaluate_Mark_Flags": [
                               "Succeeded"
                             ]
                           },
@@ -812,7 +809,8 @@
                                   "daysSinceCreation": "@div(sub(ticks(utcNow()), ticks(outputs('Evaluate_SignIn_Status')?['createdDate'])), 864000000000)",
                                   "reason": "Never logged in",
                                   "actionTaken": "@if(parameters('ReportOnly'),'REPORT ONLY','DISABLED')",
-                                  "timestamp": "@utcNow()"
+                                  "timestamp": "@utcNow()",
+                                  "reasonCode": "never-signed-in"
                                 }
                               }
                             },
@@ -887,10 +885,143 @@
                                   "@outputs('Evaluate_SignIn_Status')?['createdDate']",
                                   "@variables('Threshold')"
                                 ]
+                              },
+                              {
+                                "less": [
+                                  "@coalesce(outputs('Evaluate_SignIn_Status')?['createdDate'],'9999-12-31T23:59:59Z')",
+                                  "@variables('GraceThreshold')"
+                                ]
                               }
                             ]
                           },
                           "type": "If"
+                        },
+                        "Evaluate_Expiry": {
+                          "runAfter": {
+                            "Evaluate_SignIn_Status": [
+                              "Succeeded"
+                            ]
+                          },
+                          "type": "Compose",
+                          "inputs": {
+                            "raw": "@trim(string(coalesce(item()?['body']?['onPremisesExtensionAttributes']?['extensionAttribute13'], '')))",
+                            "candidate": "@substring(concat(trim(string(coalesce(item()?['body']?['onPremisesExtensionAttributes']?['extensionAttribute13'], ''))), '__________'), 0, 10)",
+                            "today": "@formatDateTime(utcNow(), 'yyyy-MM-dd')"
+                          }
+                        },
+                        "Evaluate_Mark_Flags": {
+                          "runAfter": {
+                            "Evaluate_Expiry": [
+                              "Succeeded"
+                            ]
+                          },
+                          "type": "Compose",
+                          "inputs": {
+                            "hasExpiryDate": "@and(and(equals(substring(outputs('Evaluate_Expiry')?['candidate'],4,1),'-'),equals(substring(outputs('Evaluate_Expiry')?['candidate'],7,1),'-')),and(equals(length(replace(replace(replace(replace(replace(replace(replace(replace(replace(replace(concat(substring(outputs('Evaluate_Expiry')?['candidate'],0,4),substring(outputs('Evaluate_Expiry')?['candidate'],5,2),substring(outputs('Evaluate_Expiry')?['candidate'],8,2)),'0',''),'1',''),'2',''),'3',''),'4',''),'5',''),'6',''),'7',''),'8',''),'9','')),0),and(and(greaterOrEquals(substring(outputs('Evaluate_Expiry')?['candidate'],5,2),'01'),lessOrEquals(substring(outputs('Evaluate_Expiry')?['candidate'],5,2),'12')),and(greaterOrEquals(substring(outputs('Evaluate_Expiry')?['candidate'],8,2),'01'),lessOrEquals(substring(outputs('Evaluate_Expiry')?['candidate'],8,2),'31')))))",
+                            "isExpired": "@less(outputs('Evaluate_Expiry')?['candidate'], outputs('Evaluate_Expiry')?['today'])",
+                            "matchedInactive": "@and(equals(outputs('Evaluate_SignIn_Status')?['hasSignIn'], true),less(coalesce(outputs('Evaluate_SignIn_Status')?['lastSignIn'],'9999-12-31T23:59:59Z'), variables('Threshold')))",
+                            "matchedNeverSignedIn": "@and(and(equals(outputs('Evaluate_SignIn_Status')?['hasSignIn'], false),not(equals(outputs('Evaluate_SignIn_Status')?['createdDate'], null))),and(less(coalesce(outputs('Evaluate_SignIn_Status')?['createdDate'],'9999-12-31T23:59:59Z'), variables('Threshold')),less(coalesce(outputs('Evaluate_SignIn_Status')?['createdDate'],'9999-12-31T23:59:59Z'), variables('GraceThreshold'))))"
+                          }
+                        },
+                        "Check_If_Expired": {
+                          "runAfter": {
+                            "Check_If_Never_LoggedIn": [
+                              "Succeeded",
+                              "Skipped"
+                            ]
+                          },
+                          "type": "If",
+                          "expression": {
+                            "and": [
+                              {
+                                "equals": [
+                                  "@outputs('Evaluate_Mark_Flags')?['hasExpiryDate']",
+                                  true
+                                ]
+                              },
+                              {
+                                "equals": [
+                                  "@outputs('Evaluate_Mark_Flags')?['isExpired']",
+                                  true
+                                ]
+                              },
+                              {
+                                "equals": [
+                                  "@outputs('Evaluate_Mark_Flags')?['matchedInactive']",
+                                  false
+                                ]
+                              },
+                              {
+                                "equals": [
+                                  "@outputs('Evaluate_Mark_Flags')?['matchedNeverSignedIn']",
+                                  false
+                                ]
+                              }
+                            ]
+                          },
+                          "actions": {
+                            "Add_Expired_To_Report": {
+                              "type": "AppendToArrayVariable",
+                              "inputs": {
+                                "name": "ReportArray",
+                                "value": {
+                                  "userId": "@outputs('Evaluate_SignIn_Status')?['userId']",
+                                  "displayName": "@outputs('Evaluate_SignIn_Status')?['displayName']",
+                                  "userPrincipalName": "@outputs('Evaluate_SignIn_Status')?['userPrincipalName']",
+                                  "mail": "@outputs('Evaluate_SignIn_Status')?['mail']",
+                                  "accessExpiredOn": "@outputs('Evaluate_Expiry')?['raw']",
+                                  "daysSinceExpiry": "@div(sub(ticks(utcNow()), ticks(outputs('Evaluate_Expiry')?['candidate'])), 864000000000)",
+                                  "reason": "Approved access period expired",
+                                  "reasonCode": "expiry",
+                                  "actionTaken": "@if(parameters('ReportOnly'),'REPORT ONLY','DISABLED')",
+                                  "timestamp": "@utcNow()"
+                                }
+                              }
+                            },
+                            "Add_Expired_To_Disable": {
+                              "runAfter": {
+                                "Add_Expired_To_Report": [
+                                  "Succeeded"
+                                ]
+                              },
+                              "type": "If",
+                              "expression": {
+                                "equals": [
+                                  "@parameters('ReportOnly')",
+                                  false
+                                ]
+                              },
+                              "else": {
+                                "actions": {}
+                              },
+                              "actions": {
+                                "Append_Disable_Expired": {
+                                  "type": "AppendToArrayVariable",
+                                  "inputs": {
+                                    "name": "DisableRequests",
+                                    "value": {
+                                      "id": "@concat('disable-', outputs('Evaluate_SignIn_Status')?['userId'])",
+                                      "method": "PATCH",
+                                      "url": "@concat('/users/', outputs('Evaluate_SignIn_Status')?['userId'])",
+                                      "headers": {
+                                        "Content-Type": "application/json"
+                                      },
+                                      "body": {
+                                        "accountEnabled": false,
+                                        "onPremisesExtensionAttributes": {
+                                          "extensionAttribute14": "MarkedEligibleforRemoval",
+                                          "extensionAttribute15": "@utcNow()"
+                                        }
+                                      }
+                                    }
+                                  }
+                                }
+                              }
+                            }
+                          },
+                          "else": {
+                            "actions": {}
+                          }
                         }
                       },
                       "runAfter": {
@@ -1337,7 +1468,9 @@
           "usersAffected": "@length(variables('ReportArray'))",
           "successfulDisables": "@variables('SuccessfulDisables')",
           "guestSourceGroupId": "@parameters('guestSourceGroupId')",
-          "finalStatus": "@variables('FinalStatus')"
+          "finalStatus": "@variables('FinalStatus')",
+          "newAccountGraceDays": "@parameters('NewAccountGraceDays')",
+          "newAccountGraceDate": "@variables('GraceThreshold')"
         },
         "summary": {
           "totalAffectedUsers": "@length(variables('ReportArray'))",
@@ -1350,8 +1483,26 @@
           "audience": "https://graph.microsoft.com",
           "reportOnly": "@parameters('ReportOnly')",
           "threshold": "@parameters('InactivityThresholdDays')",
-          "batchSize": "@parameters('BatchSize')"
+          "batchSize": "@parameters('BatchSize')",
+          "newAccountGraceDays": "@parameters('NewAccountGraceDays')"
         }
+      }
+    },
+    "Initialize_GraceThreshold": {
+      "runAfter": {
+        "Initialize_Threshold": [
+          "Succeeded"
+        ]
+      },
+      "type": "InitializeVariable",
+      "inputs": {
+        "variables": [
+          {
+            "name": "GraceThreshold",
+            "type": "string",
+            "value": "@{formatDateTime(subtractFromTime(utcNow(), parameters('NewAccountGraceDays'), 'Day'),'yyyy-MM-ddTHH:mm:ssZ')}"
+          }
+        ]
       }
     }
   }

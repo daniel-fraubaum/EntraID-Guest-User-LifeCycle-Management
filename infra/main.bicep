@@ -34,7 +34,7 @@ param inactivityThresholdDays int = 180
 @maxValue(3650)
 param deletionThresholdDays int = 30
 
-@description('Grace period for freshly created guests that have never signed in. Declared and deployed, but not yet consumed by the workflow definitions — the never-signed-in branch still compares createdDateTime against inactivityThresholdDays. Wiring it requires a workflow logic change.')
+@description('Grace period for guests that have never signed in: one is only marked once createdDateTime is older than this. Applied in addition to inactivityThresholdDays, so it is the binding constraint only when it is the larger of the two — which is what protects freshly invited guests if inactivityThresholdDays is lowered.')
 @minValue(0)
 @maxValue(3650)
 param newAccountGraceDays int = 30
@@ -42,8 +42,10 @@ param newAccountGraceDays int = 30
 @description('Dry-run switch. true = report only, nothing is disabled or deleted. Keep true for the first run.')
 param reportOnly bool = true
 
-@description('Value of extensionAttribute15 that permanently excludes a guest from the lifecycle. Consumed by the "All Guests" dynamic membership rule; surfaced here so the deployed value is discoverable on the workflow.')
-param excludeFlagValue string = 'ExcludeFromLCM'
+// Exclusion from the lifecycle is NOT a workflow parameter: it is enforced by
+// the "All Guests" dynamic group membership rule, which filters out users whose
+// extensionAttribute15 equals 'ExcludeFromLCM'. An excluded guest is never a
+// member, so it is never evaluated. See docs/deployment.md.
 
 @description('Number of users per Microsoft Graph $batch request.')
 @minValue(1)
@@ -86,9 +88,6 @@ module markWorkflow 'modules/logic-app-workflow.bicep' = {
       ReportOnly: {
         value: reportOnly
       }
-      ExcludeFlagValue: {
-        value: excludeFlagValue
-      }
       BatchSize: {
         value: batchSize
       }
@@ -113,9 +112,6 @@ module deleteWorkflow 'modules/logic-app-workflow.bicep' = {
       }
       ReportOnly: {
         value: reportOnly
-      }
-      ExcludeFlagValue: {
-        value: excludeFlagValue
       }
       BatchSize: {
         value: batchSize

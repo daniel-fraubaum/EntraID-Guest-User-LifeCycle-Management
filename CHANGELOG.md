@@ -13,11 +13,17 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 - `infra/deploy.sh` and `infra/deploy.ps1` — create the resource group, deploy the Bicep, and assign the Microsoft Graph app roles to both managed identities. Idempotent, with 5 × 15 s retries around every directory lookup and role assignment, and no API call made with an empty id. Support `--skip-infra`, `--skip-permissions` and a `--report-only true|false` switch that updates only that parameter.
 - `infra/main.parameters.json` — sample parameter file.
 - `docs/deployment.md` — prerequisites, quickstart for both operating systems, mandatory first-run-in-report-only guidance, parameter reference and troubleshooting table.
-- Workflow parameters `NewAccountGraceDays` and `ExcludeFlagValue`, declared and deployed but not yet consumed by any workflow expression.
+- **Expiry-based marking (VouchGate handoff)** — the Mark workflow additionally marks a guest whose `onPremisesExtensionAttributes.extensionAttribute13` holds a date in the past, with reason `Approved access period expired` / `reasonCode: expiry`. Empty, null, whitespace and unparseable values are treated as "no expiry set" and never mark: the value must have a well-formed `yyyy-MM-dd` prefix with an in-range month and day before it is compared against today.
+- **New-account grace period** — a never-signed-in guest is only marked once `createdDateTime` is older than `NewAccountGraceDays`, applied in addition to `InactivityThresholdDays`.
+- `reasonCode` on every report entry (`inactivity` | `never-signed-in` | `expiry`), so a report-only run distinguishes why each guest was selected. The three conditions are mutually exclusive, so a guest appears at most once per run and produces at most one disable request.
+- `newAccountGraceDays` / `newAccountGraceDate` in the Mark report metadata.
+- `onPremisesExtensionAttributes` added to the `$select` of the guest evaluation call.
+- README: real report schemas for both workflows, replacing example JSON that did not match what the workflows emit; per-reason field tables; an explicit section on how exclusion works and how the two uses of `extensionAttribute15` can collide.
 
 ### Changed
 
 - Mark workflow parameter `Threshold` renamed to `InactivityThresholdDays`.
+- `NewAccountGraceDays` is now wired into the never-signed-in condition (it was previously declared and deployed but unused).
 - `ReportOnly` now defaults to `true` in both workflow definitions.
 - README and `docs/PERMISSIONS-REFERENCE.md` state that reading `signInActivity` requires both the `AuditLog.Read.All` application permission and a Microsoft Entra ID P1/P2 license.
 - `docs/DEPLOYMENT-GUIDE.md` marked as superseded by `docs/deployment.md`.
@@ -26,9 +32,11 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 - The two root-level ARM templates, replaced by `workflows/` + `infra/`.
 - The two per-workflow `*_Permissions.sh` scripts, replaced by the role assignment in `infra/deploy.sh` / `infra/deploy.ps1`.
+- The `ExcludeFlagValue` parameter, from both workflows and from `infra/`. Nothing read it: exclusion is enforced by the dynamic membership rule of the guest source group (`extensionAttribute15 -ne "ExcludeFromLCM"`). The mechanism, and the collision between the sentinel and the mark timestamp, are now documented in the README and `docs/deployment.md` instead.
 
-No workflow logic changed: every action, condition, expression and `runAfter` edge
-is carried over unchanged apart from the parameter rename above.
+Existing marking behaviour is preserved: the inactivity and never-signed-in
+conditions keep their original predicates, with the grace period added as an
+additional necessary condition rather than a replacement.
 
 ## [1.0.0] - 2025
 

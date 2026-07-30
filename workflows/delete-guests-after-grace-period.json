@@ -14,10 +14,6 @@
       "type": "Bool",
       "defaultValue": true
     },
-    "ExcludeFlagValue": {
-      "type": "String",
-      "defaultValue": "ExcludeFromLCM"
-    },
     "BatchSize": {
       "type": "Int",
       "defaultValue": 20

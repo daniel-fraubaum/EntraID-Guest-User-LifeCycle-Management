@@ -68,8 +68,17 @@ object IDs:
 | `GRP_SEC_GuestUserLCM_AllGuests` | Mark workflow | Guests, enabled, not excluded via `extensionAttribute15` |
 | `GRP_SEC_GuestUserLCM_EligibleForRemoval` | Delete workflow | `extensionAttribute14 = MarkedEligibleforRemoval` and disabled |
 
-`extensionAttribute14` and `extensionAttribute15` must be free for this
-solution's use in your tenant.
+Extension attributes used:
+
+| Attribute | Direction | Meaning |
+| --- | --- | --- |
+| `extensionAttribute13` | **read only** | Approved access end date, written by VouchGate. A parseable `yyyy-MM-dd` in the past marks the guest with `reasonCode: expiry`. Empty, null and unparseable values are treated as "no expiry set" and never mark. |
+| `extensionAttribute14` | written by Mark, read by Delete | Lifecycle flag, always the literal `MarkedEligibleforRemoval` regardless of which of the three reasons fired — the Delete workflow gates on exact equality, so a reason-specific value would break the handoff. |
+| `extensionAttribute15` | written by Mark, read by Delete and by the group rule | Mark timestamp **and** exclusion sentinel. See [Exclusion](#exclusion-enforced-by-the-group-not-the-workflow). |
+
+`extensionAttribute14` and `extensionAttribute15` must be free for this solution's
+use in your tenant. `extensionAttribute13` must be free *or* owned by VouchGate —
+this solution only reads it.
 
 ---
 
@@ -204,7 +213,15 @@ What to check in the report before going live:
 - `reportMetadata.mode` is `Report Only` — proof nothing was changed.
 - `reportMetadata.totalMembersFound` is non-zero. Zero means the dynamic group is empty or unreadable, not that every guest is active.
 - `summary.totalAffectedUsers` is plausible for your tenant. A surprisingly high number usually means the threshold is too aggressive or `signInActivity` is missing (see troubleshooting).
+- **`affectedUsers[].reasonCode`** — every entry carries one of `inactivity`,
+  `never-signed-in` or `expiry`. Check the mix:
+  - a large `expiry` count usually means `extensionAttribute13` was backfilled with historical dates;
+  - a large `never-signed-in` count with recent `createdDateTime` values means `newAccountGraceDays` is too low for your invitation flow;
+  - everything landing in `inactivity` with `lastSignIn: null` means `signInActivity` is not being returned at all — check licensing and `AuditLog.Read.All`.
 - `affectedUsers[]` — spot-check a few UPNs by hand against the Entra ID sign-in logs.
+
+The three reasons are mutually exclusive by construction, so a guest appears at
+most once per run and produces at most one disable request.
 
 ### 3. Go live
 
@@ -231,24 +248,60 @@ Set on `infra/main.bicep`; each is passed through to the corresponding workflow 
 | `eligibleForRemovalGroupId` | `guestSourceGroupId` | — | Delete | Object ID of the Eligible For Removal group |
 | `inactivityThresholdDays` | `InactivityThresholdDays` | `180` | Mark | Days since last sign-in before a guest is marked |
 | `deletionThresholdDays` | `DeletionThresholdDays` | `30` | Delete | Days after marking before deletion |
-| `newAccountGraceDays` | `NewAccountGraceDays` | `30` | Mark | Grace period for never-signed-in new accounts. **Declared and deployed but not yet consumed** — see note below |
+| `newAccountGraceDays` | `NewAccountGraceDays` | `30` | Mark | Minimum account age before a never-signed-in guest may be marked. **Additional** to `inactivityThresholdDays`, not a replacement |
 | `reportOnly` | `ReportOnly` | `true` | Both | Dry run. Nothing is disabled or deleted while true |
-| `excludeFlagValue` | `ExcludeFlagValue` | `ExcludeFromLCM` | Both | Value of `extensionAttribute15` that permanently excludes a guest |
 | `batchSize` | `BatchSize` | `20` | Both | Users per Graph `$batch` request (1–100) |
 | `workflowState` | — | `Enabled` | Both | `Disabled` deploys the workflows without arming the schedule |
 
-Two parameters are deployed but not yet read by any workflow expression, because
-wiring them requires a workflow logic change that is deliberately out of scope
-for this restructure:
+Every declared workflow parameter is now read by the definitions — there are no
+inert parameters. Two notes on semantics:
 
-- **`NewAccountGraceDays`** — the never-signed-in branch currently compares
-  `createdDateTime` against `InactivityThresholdDays`. A guest created 200 days
-  ago that never signed in is marked at the 180-day threshold; there is no
-  separate new-account grace period yet.
-- **`ExcludeFlagValue`** — exclusion is enforced by the `All Guests` **dynamic
-  group membership rule**, not by the workflow. Changing this value means editing
-  that rule too. It is surfaced on the workflow so the deployed value is
-  discoverable and auditable alongside everything else.
+- **`newAccountGraceDays` is a guard, not a switch.** A never-signed-in guest must
+  be older than `inactivityThresholdDays` **and** older than `newAccountGraceDays`.
+  With the defaults (`180` / `30`) the 180-day threshold binds and behaviour is
+  identical to before this parameter was wired. The grace period only becomes the
+  binding constraint when it exceeds `inactivityThresholdDays` — which is the case
+  it exists for, since email-invited guests may have no sign-in for weeks before
+  first redemption. If you lower `inactivityThresholdDays` to, say, 14 days, raise
+  `newAccountGraceDays` to keep fresh invitations safe.
+- **There is no exclusion parameter.** See the next section.
+
+## Exclusion: enforced by the group, not the workflow
+
+Neither workflow contains exclusion logic. A guest is excluded by the *dynamic
+membership rule* of the source group:
+
+```kusto
+(user.userType -eq "Guest") and (user.extensionAttribute15 -ne "ExcludeFromLCM") and (user.accountEnabled -eq true)
+```
+
+An excluded guest is not a member of `GRP_SEC_GuestUserLCM_AllGuests`, so the Mark
+workflow never enumerates it and never evaluates it. The workflow processes
+whatever the group hands it. Changing the sentinel value `"ExcludeFromLCM"` means
+editing that membership rule — nothing in `infra/` or `workflows/` reads it, which
+is why it is not exposed as a parameter.
+
+### `extensionAttribute15` carries two meanings
+
+The same field is both the exclusion sentinel and the mark timestamp. That is
+workable but it can collide:
+
+| Situation | Outcome |
+| --- | --- |
+| Excluded *before* ever being marked | Safe. Never in the group → never evaluated → the flag survives. |
+| Excluded *after* being marked | The mark timestamp is replaced by `"ExcludeFromLCM"`. The Delete workflow compares that value against a threshold date, and `"ExcludeFromLCM"` sorts after any ISO date, so the guest is **not** deleted. Exclusion wins — the safe direction. |
+| Excluded but still in the group, because dynamic membership has not re-evaluated | The Mark workflow **overwrites the exclusion flag with the mark timestamp, destroying the exclusion permanently.** Nothing restores it. |
+
+The third row is the operational hazard. Dynamic group membership is not
+instantaneous. After setting `extensionAttribute15 = "ExcludeFromLCM"`, confirm the
+guest has actually left `GRP_SEC_GuestUserLCM_AllGuests` before the next scheduled
+Mark run — or make the change while `reportOnly` is `true`, where nothing is
+written back at all.
+
+If you need exclusion that cannot be clobbered, use a field the workflow never
+writes: point the membership rule at a different unused `extensionAttribute`, or
+exclude by group membership instead. That is a change to the rule and the
+prerequisites, not to the workflows.
 
 ---
 
@@ -262,6 +315,9 @@ for this restructure:
 | Report shows every guest as never-signed-in | `signInActivity` is absent — missing P1/P2 license or `AuditLog.Read.All` | Verify tenant licensing, then confirm the role assignment on **both** identities |
 | `totalMembersFound: 0` | Group ID wrong, group empty, or `GroupMember.Read.All` missing | Check the object ID; confirm membership in the Portal; re-run role assignment |
 | Users marked but never deleted | Delete workflow still in report-only, grace period not elapsed, or the user is not in the Eligible group | Check `ReportOnly`, `extensionAttribute15` age vs `deletionThresholdDays`, and that `accountEnabled = false` |
+| Guests marked `reasonCode: expiry` unexpectedly | `extensionAttribute13` holds historical dates, e.g. from a backfill | Inspect the `accessExpiredOn` values in the report; clear or correct the attribute before leaving report-only |
+| A guest with an expiry date in the past is **not** marked | Value is not a parseable `yyyy-MM-dd`, or the guest already matched `inactivity` / `never-signed-in` in the same run | Check the exact attribute value; the three reasons are exclusive, so a guest already marked for another reason will not also appear as `expiry` |
+| An excluded guest got marked anyway | Dynamic group membership had not re-evaluated, so the guest was still a member and the mark overwrote `"ExcludeFromLCM"` | Restore the flag, confirm the guest leaves the group, and see [Exclusion](#exclusion-enforced-by-the-group-not-the-workflow) |
 | Run fails with a rate-limit message | Graph throttling on `$batch` | Lower `batchSize` and redeploy |
 | Deployment fails: `expected value of type … 36` | A group ID is empty or not a GUID | Pass real object IDs — `main.bicep` rejects malformed ones rather than deploying a broken workflow |
 | `deploy.sh: jq not found` | jq missing | Install jq, or use `deploy.ps1`, or run in Azure Cloud Shell |
