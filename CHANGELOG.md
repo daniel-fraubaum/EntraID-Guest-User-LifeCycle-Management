@@ -4,10 +4,27 @@ All notable changes to this project will be documented in this file.
 
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
-## [Unreleased]
+## [2.0.0] - 2026
+
+### Fixed
+
+- **Throttled items inside Graph `$batch` calls are no longer silently dropped** ([#2](https://github.com/daniel-fraubaum/EntraID-Guest-User-LifeCycle-Management/issues/2), reported by [@jaw2floor](https://github.com/jaw2floor)). Microsoft Graph JSON batching answers `200` for the batch as a whole while each response inside it carries its own status, and the workflows only ever inspected the transport status. Any guest whose individual response was `429` was skipped without a trace.
+
+  Every `$batch` call is now wrapped in an `Until` loop that inspects per-item status codes and retries only the affected items:
+
+  - responses with `2xx`/`3xx` proceed exactly as before;
+  - `429` **and** `5xx` responses are collected into a retry list, and the loop waits for the highest `Retry-After` value found among them (fallback 30 s if the header is absent, capped at 300 s so a pathological value cannot exhaust the loop timeout) before resending a batch rebuilt from that list alone;
+  - up to 5 attempts, after which anything still failing is written to a `throttledUnprocessed` report section with its request id and attempt count, and a warning is emitted in `summary.warnings` — **the run does not fail**, so nothing disappears silently;
+  - `4xx` other than `429` are permanent, so they are recorded in a new `errors` report section with status, error code and message, and are not retried.
+
+  Applied to `GetUserInfosBatch` and `Execute_DisableBatch` in the Mark workflow and to `Execute_DeleteBatch` in the Delete workflow — the three actions named in the issue — and additionally to `GetUserInfosBatch` in the Delete workflow, which carried the identical defect.
+
+- The per-item success test for the disable and delete batches now accepts any `2xx` instead of exactly `200` / `204`. Graph answers `204` for `PATCH /users` and `DELETE /users`, so the previous exact tests misclassified one of the two.
 
 ### Added
 
+- **Exclusion guard in the Mark workflow.** A guest whose `extensionAttribute15` equals `ExcludeFromLCM` (compared case-insensitively) is never marked and never disabled, regardless of group membership, and is counted in a new `excluded` report section. This closes the documented hazard where a guest still present in the source group during dynamic-membership re-evaluation lag had its exclusion flag permanently overwritten by the mark timestamp.
+- `throttledUnprocessed`, `errors` and (Mark only) `excluded` sections in both run reports, with matching counts in `reportMetadata` and `summary`, plus `summary.warnings`.
 - `workflows/` — both workflow definitions, extracted from the ARM wrappers and parameterized.
 - `infra/main.bicep` + `infra/modules/logic-app-workflow.bicep` — deploy both Consumption Logic Apps with system-assigned managed identities, definitions embedded from `workflows/` at build time.
 - `infra/deploy.sh` and `infra/deploy.ps1` — create the resource group, deploy the Bicep, and assign the Microsoft Graph app roles to both managed identities. Idempotent, with 5 × 15 s retries around every directory lookup and role assignment, and no API call made with an empty id. Support `--skip-infra`, `--skip-permissions` and a `--report-only true|false` switch that updates only that parameter.

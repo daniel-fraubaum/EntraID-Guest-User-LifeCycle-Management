@@ -48,6 +48,7 @@ This solution consists of two independent Logic Apps:
   - **Never signed in** — no sign-in activity *and* created longer ago than **both** `InactivityThresholdDays` and `NewAccountGraceDays`
   - **Expiry** — `extensionAttribute13` holds a date in the past (approved access period elapsed; written by VouchGate)
 - 🏷️ Each condition is mutually exclusive, so a guest is marked at most once per run and carries a single `reasonCode`
+- 🚫 Skips any guest whose `extensionAttribute15` is `ExcludeFromLCM`, regardless of group membership
 - 🏷️ Actions:
   - Set `extensionAttribute14 = "MarkedEligibleforRemoval"`
   - Set `extensionAttribute15 = <UTC timestamp>`
@@ -114,23 +115,29 @@ by the *dynamic membership rule* of the guest source group:
 ```
 
 A guest with `extensionAttribute15 = "ExcludeFromLCM"` is never a member of
-`GRP_SEC_GuestUserLCM_AllGuests`, so the Mark workflow never enumerates it and
-never evaluates it. The workflow itself contains no exclusion logic — it processes
-whatever the group hands it. Changing the sentinel value means editing that
-membership rule; nothing in `infra/` or `workflows/` reads it.
+`GRP_SEC_GuestUserLCM_AllGuests`, so the Mark workflow normally never enumerates
+it. Changing the sentinel value means editing that membership rule; nothing in
+`infra/` or `workflows/` reads it as a parameter.
 
-**⚠️ The two uses of `extensionAttribute15` share one field, and they can collide:**
+**Second line of defence, in the workflow itself.** Because dynamic membership
+re-evaluation is not instantaneous, the Mark workflow *also* checks
+`extensionAttribute15` on every guest it evaluates and skips any whose value is
+`ExcludeFromLCM` (compared case-insensitively) — never marking, never disabling,
+regardless of how it ended up in the group. Skipped guests are listed in the
+report's `excluded[]` section.
+
+**The two uses of `extensionAttribute15` share one field. How each case resolves:**
 
 | Situation | Outcome |
 | --- | --- |
-| Guest excluded *before* ever being marked | Safe. Never in the group → never evaluated → `extensionAttribute15` keeps `"ExcludeFromLCM"`. |
-| Guest excluded *after* it was already marked | The mark timestamp is overwritten by `"ExcludeFromLCM"`. The Delete workflow compares that value against a date and `"ExcludeFromLCM"` sorts after any ISO date, so the guest is **not** deleted — exclusion wins, which is the safe direction. |
-| Guest is excluded but still in the group (rule not yet re-evaluated, or membership cached) | The Mark workflow **overwrites `"ExcludeFromLCM"` with the mark timestamp, destroying the exclusion permanently.** Nothing restores it. |
+| Guest excluded *before* ever being marked | Safe. Not in the group → never evaluated → the flag survives. |
+| Guest excluded *after* it was already marked | The mark timestamp is replaced by `"ExcludeFromLCM"`. The Delete workflow compares that value against a threshold date, and `"ExcludeFromLCM"` sorts after any ISO date, so the guest is **not** deleted. Exclusion wins — the safe direction. |
+| Guest is excluded but still in the group (rule not yet re-evaluated, or membership cached) | **Safe since v2.0.0.** The in-workflow guard skips it and records it under `excluded[]`, so the exclusion flag is no longer overwritten by the mark timestamp. Before v2.0.0 this destroyed the exclusion permanently. |
 
-The third row is the one to watch. Dynamic group membership is not instantaneous:
-set the exclusion flag and confirm the guest has actually left
-`GRP_SEC_GuestUserLCM_AllGuests` before the next scheduled Mark run, or exclude
-the guest while the workflow is in `ReportOnly = true`.
+⚠️ The guard protects the flag, not the field: if you use `extensionAttribute15`
+for anything *other* than the exclusion sentinel, the Mark workflow will still
+overwrite that value with a timestamp when it marks a guest. Keep the field
+dedicated to this solution.
 
 ---
 
@@ -286,6 +293,9 @@ condition.
     "totalMembersFound": 120,
     "usersAffected": 18,
     "successfulDisables": 0,
+    "throttledUnprocessedCount": 2,
+    "itemErrorCount": 1,
+    "excludedCount": 3,
     "guestSourceGroupId": "11111111-1111-1111-1111-111111111111",
     "finalStatus": "Success"
   },
@@ -293,6 +303,13 @@ condition.
     "totalAffectedUsers": 18,
     "accountsDisabled": 0,
     "reportOnlyMode": true,
+    "throttledUnprocessedCount": 2,
+    "errorCount": 1,
+    "excludedCount": 3,
+    "warnings": [
+      "2 request(s) were still throttled after 5 attempts and were NOT processed this run. See throttledUnprocessed.",
+      "1 request(s) failed with a non-retryable error. See errors."
+    ],
     "message": "18 users marked for removal"
   },
   "affectedUsers": [
@@ -333,6 +350,39 @@ condition.
       "timestamp": "2026-07-30T01:00:11Z"
     }
   ],
+  "throttledUnprocessed": [
+    {
+      "requestId": "66666666-6666-6666-6666-666666666666",
+      "phase": "read-guest-attributes",
+      "attempts": 5,
+      "reason": "Still throttled or unavailable after the final retry attempt"
+    },
+    {
+      "requestId": "disable-77777777-7777-7777-7777-777777777777",
+      "phase": "disable-guest",
+      "attempts": 5,
+      "reason": "Still throttled or unavailable after the final retry attempt"
+    }
+  ],
+  "errors": [
+    {
+      "requestId": "88888888-8888-8888-8888-888888888888",
+      "status": 404,
+      "errorCode": "Request_ResourceNotFound",
+      "errorMessage": "Resource '8888...' does not exist or one of its queried reference-property objects are not present.",
+      "phase": "read-guest-attributes",
+      "attempt": 1
+    }
+  ],
+  "excluded": [
+    {
+      "userId": "99999999-9999-9999-9999-999999999999",
+      "displayName": "VIP Guest",
+      "userPrincipalName": "vip_partner.com#EXT#@tenant.onmicrosoft.com",
+      "reason": "extensionAttribute15 is set to ExcludeFromLCM",
+      "timestamp": "2026-07-30T01:00:08Z"
+    }
+  ],
   "configuration": {
     "audience": "https://graph.microsoft.com",
     "reportOnly": true,
@@ -342,6 +392,18 @@ condition.
   }
 }
 ```
+
+The three new sections are always present, empty when nothing applies:
+
+| Section | Meaning | Action needed |
+| --- | --- | --- |
+| `throttledUnprocessed[]` | Requests that were still `429`/`5xx` after the final retry attempt. **These guests were not evaluated or not disabled this run.** | Usually none — the next scheduled run picks them up. A persistently large count means `BatchSize` is too high for your tenant's throttling limits. |
+| `errors[]` | Per-item `4xx` other than `429`: permanent failures, not retried. `403` means a missing Graph app role; `404` usually means the guest was deleted between enumeration and evaluation. | Investigate `403`s. `404`s are typically benign. |
+| `excluded[]` | Guests skipped because `extensionAttribute15` is `ExcludeFromLCM`. Never marked, never disabled. | None — this is the guard working. |
+
+`requestId` is the batch request id: the bare user object id for the read phase,
+and `disable-<userId>` for the disable phase. `phase` disambiguates
+(`read-guest-attributes` or `disable-guest`).
 
 Per-reason fields in `affectedUsers[]`:
 
@@ -373,6 +435,8 @@ identical (`extensionAttribute14 = "MarkedEligibleforRemoval"`).
     "totalProcessedUsers": 42,
     "usersDeleted": 12,
     "successfulDeletes": 0,
+    "throttledUnprocessedCount": 0,
+    "itemErrorCount": 0,
     "guestSourceGroupId": "55555555-5555-5555-5555-555555555555",
     "failedDeletes": []
   },
@@ -381,6 +445,9 @@ identical (`extensionAttribute14 = "MarkedEligibleforRemoval"`).
     "accountsDeleted": 0,
     "reportOnlyMode": true,
     "failedDeletesCount": 0,
+    "throttledUnprocessedCount": 0,
+    "errorCount": 0,
+    "warnings": [],
     "message": "12 users processed for deletion"
   },
   "deletedUsers": [
@@ -396,6 +463,8 @@ identical (`extensionAttribute14 = "MarkedEligibleforRemoval"`).
     }
   ],
   "failedDeletes": [],
+  "throttledUnprocessed": [],
+  "errors": [],
   "configuration": {
     "audience": "https://graph.microsoft.com",
     "reportOnly": true,
@@ -405,6 +474,38 @@ identical (`extensionAttribute14 = "MarkedEligibleforRemoval"`).
   }
 }
 ```
+
+`throttledUnprocessed[]` and `errors[]` carry the same shape as in the Mark
+report, with `phase` values `read-guest-attributes` and `delete-guest`. Note that
+`failedDeletes[]` predates the throttling fix and is now effectively unreachable:
+per-item `4xx`/`5xx` are routed to `errors[]` and `throttledUnprocessed[]` before
+the delete counter sees them.
+
+---
+
+## 🚦 Throttling and Retries
+
+Microsoft Graph JSON batching returns **`200` for the batch as a whole** while
+each response *inside* it carries its own status code. A `429` on an individual
+item therefore does not surface as a failed HTTP call — which is how throttled
+guests used to be dropped without a trace
+([#2](https://github.com/daniel-fraubaum/EntraID-Guest-User-LifeCycle-Management/issues/2)).
+
+Every `$batch` call is now wrapped in a retry loop:
+
+| Per-item status | Treatment |
+| --- | --- |
+| `2xx` / `3xx` | Success — processed as normal |
+| `429` | Retried, honouring `Retry-After` |
+| `5xx` | Retried on the same path as `429` |
+| `4xx` except `429` | **Not** retried — recorded in `errors[]` |
+
+- Only the affected items are resent; successful items are never re-sent.
+- The wait is the **highest** `Retry-After` among the throttled items, falling back to **30 s** when the header is absent and capped at **300 s** so one pathological value cannot exhaust the loop timeout.
+- Up to **5 attempts**. Whatever is still failing afterwards lands in `throttledUnprocessed[]` with a warning in `summary.warnings` — **the run does not fail**, so the remaining work is visible and the next scheduled run retries it.
+
+💡 A consistently non-empty `throttledUnprocessed[]` means `BatchSize` is too
+aggressive for your tenant. Lower it and redeploy.
 
 ---
 
