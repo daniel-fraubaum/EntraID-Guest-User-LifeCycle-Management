@@ -1,0 +1,23 @@
+# Build and release artifacts. Release archives are generated from a tag with
+# `git archive`, so they are never committed:
+#   git archive --format=zip --prefix=lcm-<version>/ -o dist/lcm-<version>.zip HEAD
+dist/
+
+# Compiled Bicep output, when built locally for inspection
+infra/*.json.out
+main.json
+
+# Python bytecode from scripts/
+__pycache__/
+*.py[cod]
+
+# Local editor and OS noise
+.DS_Store
+Thumbs.db
+*.swp
+.idea/
+.vscode/
+
+# Local-only Claude Code settings. .claude/settings.json and .mcp.json are
+# intentionally tracked so the project MCP server is shared.
+.claude/settings.local.json
