@@ -1,0 +1,1358 @@
+{
+  "$schema": "https://schema.management.azure.com/providers/Microsoft.Logic/schemas/2016-06-01/workflowdefinition.json#",
+  "description": "Automated lifecycle management for Entra ID guest users. Checks all members of a given group for inactivity, disables inactive or never-logged-in accounts (unless 'report only' is set), and generates a detailed report. Robust error handling for all API calls. This workflow is scheduled to run weekly.",
+  "parameters": {
+    "guestSourceGroupId": {
+      "type": "String",
+      "defaultValue": ""
+    },
+    "InactivityThresholdDays": {
+      "type": "Int",
+      "defaultValue": 180
+    },
+    "NewAccountGraceDays": {
+      "type": "Int",
+      "defaultValue": 30
+    },
+    "ReportOnly": {
+      "type": "Bool",
+      "defaultValue": true
+    },
+    "ExcludeFlagValue": {
+      "type": "String",
+      "defaultValue": "ExcludeFromLCM"
+    },
+    "BatchSize": {
+      "type": "Int",
+      "defaultValue": 20
+    }
+  },
+  "triggers": {
+    "Recurrence": {
+      "recurrence": {
+        "frequency": "Week",
+        "interval": 1,
+        "schedule": {
+          "weekDays": [
+            "Sunday"
+          ],
+          "hours": [
+            1
+          ],
+          "minutes": [
+            0
+          ]
+        }
+      },
+      "type": "Recurrence"
+    }
+  },
+  "actions": {
+    "Initialize_Threshold": {
+      "runAfter": {},
+      "type": "InitializeVariable",
+      "inputs": {
+        "variables": [
+          {
+            "name": "Threshold",
+            "type": "string",
+            "value": "@{formatDateTime(subtractFromTime(utcNow(), parameters('InactivityThresholdDays'), 'Day'),'yyyy-MM-ddTHH:mm:ssZ')}"
+          }
+        ]
+      }
+    },
+    "Initialize_Report_Array": {
+      "runAfter": {
+        "Initialize_Threshold": [
+          "Succeeded"
+        ]
+      },
+      "type": "InitializeVariable",
+      "inputs": {
+        "variables": [
+          {
+            "name": "ReportArray",
+            "type": "array",
+            "value": []
+          }
+        ]
+      }
+    },
+    "Initialize_NextLink": {
+      "runAfter": {
+        "Initialize_Report_Array": [
+          "Succeeded"
+        ]
+      },
+      "type": "InitializeVariable",
+      "inputs": {
+        "variables": [
+          {
+            "name": "NextLink",
+            "type": "string",
+            "value": "@{concat('https://graph.microsoft.com/v1.0/groups/',encodeURIComponent(parameters('guestSourceGroupId')),'/members?$select=id&$top=999')}"
+          }
+        ]
+      }
+    },
+    "Initialize_AllMembers": {
+      "runAfter": {
+        "Initialize_NextLink": [
+          "Succeeded"
+        ]
+      },
+      "type": "InitializeVariable",
+      "inputs": {
+        "variables": [
+          {
+            "name": "AllMembers",
+            "type": "array",
+            "value": []
+          }
+        ]
+      }
+    },
+    "Initialize_TotalMembersCount": {
+      "runAfter": {
+        "Do_Until_All_Pages": [
+          "Succeeded"
+        ]
+      },
+      "type": "InitializeVariable",
+      "inputs": {
+        "variables": [
+          {
+            "name": "TotalMembersCount",
+            "type": "integer",
+            "value": "@length(variables('AllMembers'))"
+          }
+        ]
+      }
+    },
+    "Initialize_RemainingMembers": {
+      "runAfter": {
+        "Initialize_AllMembers": [
+          "Succeeded"
+        ]
+      },
+      "type": "InitializeVariable",
+      "inputs": {
+        "variables": [
+          {
+            "name": "RemainingMembers",
+            "type": "array",
+            "value": []
+          }
+        ]
+      }
+    },
+    "Initialize_DisableRequests": {
+      "runAfter": {
+        "Initialize_RemainingMembers": [
+          "Succeeded"
+        ]
+      },
+      "type": "InitializeVariable",
+      "inputs": {
+        "variables": [
+          {
+            "name": "DisableRequests",
+            "type": "array",
+            "value": []
+          }
+        ]
+      }
+    },
+    "Initialize_HasApiError": {
+      "runAfter": {
+        "Initialize_DisableRequests": [
+          "Succeeded"
+        ]
+      },
+      "type": "InitializeVariable",
+      "inputs": {
+        "variables": [
+          {
+            "name": "HasApiError",
+            "type": "boolean",
+            "value": false
+          }
+        ]
+      }
+    },
+    "Initialize_ApiErrorMessage": {
+      "runAfter": {
+        "Initialize_HasApiError": [
+          "Succeeded"
+        ]
+      },
+      "type": "InitializeVariable",
+      "inputs": {
+        "variables": [
+          {
+            "name": "ApiErrorMessage",
+            "type": "string",
+            "value": ""
+          }
+        ]
+      }
+    },
+    "Initialize_FinalStatus": {
+      "runAfter": {
+        "Initialize_ApiErrorMessage": [
+          "Succeeded"
+        ]
+      },
+      "type": "InitializeVariable",
+      "inputs": {
+        "variables": [
+          {
+            "name": "FinalStatus",
+            "type": "string",
+            "value": ""
+          }
+        ]
+      }
+    },
+    "Initialize_TotalProcessedUsers": {
+      "runAfter": {
+        "Initialize_FinalStatus": [
+          "Succeeded"
+        ]
+      },
+      "type": "InitializeVariable",
+      "inputs": {
+        "variables": [
+          {
+            "name": "TotalProcessedUsers",
+            "type": "integer",
+            "value": 0
+          }
+        ]
+      }
+    },
+    "Initialize_SuccessfulDisables": {
+      "runAfter": {
+        "Initialize_TotalProcessedUsers": [
+          "Succeeded"
+        ]
+      },
+      "type": "InitializeVariable",
+      "inputs": {
+        "variables": [
+          {
+            "name": "SuccessfulDisables",
+            "type": "integer",
+            "value": 0
+          }
+        ]
+      }
+    },
+    "Initialize_HasRateLimit": {
+      "runAfter": {
+        "Initialize_SuccessfulDisables": [
+          "Succeeded"
+        ]
+      },
+      "type": "InitializeVariable",
+      "inputs": {
+        "variables": [
+          {
+            "name": "HasRateLimit",
+            "type": "boolean",
+            "value": false
+          }
+        ]
+      }
+    },
+    "Initialize_HasTerminateError": {
+      "runAfter": {
+        "Initialize_HasRateLimit": [
+          "Succeeded"
+        ]
+      },
+      "type": "InitializeVariable",
+      "inputs": {
+        "variables": [
+          {
+            "name": "HasTerminateError",
+            "type": "boolean",
+            "value": false
+          }
+        ]
+      }
+    },
+    "Initialize_TerminateErrorMessage": {
+      "runAfter": {
+        "Initialize_HasTerminateError": [
+          "Succeeded"
+        ]
+      },
+      "type": "InitializeVariable",
+      "inputs": {
+        "variables": [
+          {
+            "name": "TerminateErrorMessage",
+            "type": "string",
+            "value": ""
+          }
+        ]
+      }
+    },
+    "Initialize_DisableBatchError": {
+      "runAfter": {
+        "Initialize_TerminateErrorMessage": [
+          "Succeeded"
+        ]
+      },
+      "type": "InitializeVariable",
+      "inputs": {
+        "variables": [
+          {
+            "name": "HasDisableBatchError",
+            "type": "boolean",
+            "value": false
+          }
+        ]
+      }
+    },
+    "Do_Until_All_Pages": {
+      "actions": {
+        "GetMembersPage": {
+          "type": "Http",
+          "inputs": {
+            "uri": "@{variables('NextLink')}",
+            "method": "GET",
+            "authentication": {
+              "type": "ManagedServiceIdentity",
+              "audience": "https://graph.microsoft.com"
+            },
+            "retryPolicy": {
+              "type": "exponential",
+              "count": 3,
+              "interval": "PT20S"
+            }
+          }
+        },
+        "Check_GetMembersPage_Error": {
+          "actions": {
+            "SetApiErrorFlag": {
+              "type": "SetVariable",
+              "inputs": {
+                "name": "HasApiError",
+                "value": true
+              }
+            },
+            "SetApiErrorMessage": {
+              "type": "SetVariable",
+              "inputs": {
+                "name": "ApiErrorMessage",
+                "value": "@{concat('API Error (', outputs('GetMembersPage')?['statusCode'], '): ', outputs('GetMembersPage')?['body']?['error']?['message'])}"
+              }
+            }
+          },
+          "runAfter": {
+            "GetMembersPage": [
+              "Succeeded",
+              "Failed",
+              "TimedOut",
+              "Skipped"
+            ]
+          },
+          "else": {
+            "actions": {}
+          },
+          "expression": {
+            "or": [
+              {
+                "not": {
+                  "equals": [
+                    "@outputs('GetMembersPage')?['statusCode']",
+                    200
+                  ]
+                }
+              },
+              {
+                "equals": [
+                  "@outputs('GetMembersPage')?['statusCode']",
+                  400
+                ]
+              },
+              {
+                "equals": [
+                  "@outputs('GetMembersPage')?['statusCode']",
+                  401
+                ]
+              },
+              {
+                "equals": [
+                  "@outputs('GetMembersPage')?['statusCode']",
+                  403
+                ]
+              },
+              {
+                "equals": [
+                  "@outputs('GetMembersPage')?['statusCode']",
+                  404
+                ]
+              },
+              {
+                "equals": [
+                  "@outputs('GetMembersPage')?['statusCode']",
+                  409
+                ]
+              },
+              {
+                "equals": [
+                  "@outputs('GetMembersPage')?['statusCode']",
+                  429
+                ]
+              },
+              {
+                "equals": [
+                  "@outputs('GetMembersPage')?['statusCode']",
+                  500
+                ]
+              },
+              {
+                "equals": [
+                  "@outputs('GetMembersPage')?['statusCode']",
+                  503
+                ]
+              }
+            ]
+          },
+          "type": "If"
+        },
+        "AppendMembers": {
+          "foreach": "@body('GetMembersPage')?['value']",
+          "actions": {
+            "AppendSingleMember": {
+              "type": "AppendToArrayVariable",
+              "inputs": {
+                "name": "AllMembers",
+                "value": "@item()"
+              }
+            }
+          },
+          "runAfter": {
+            "Check_GetMembersPage_Error": [
+              "Succeeded",
+              "Skipped",
+              "Failed",
+              "TimedOut"
+            ]
+          },
+          "type": "Foreach"
+        },
+        "SetNextLink": {
+          "runAfter": {
+            "AppendMembers": [
+              "Succeeded",
+              "Skipped",
+              "Failed",
+              "TimedOut"
+            ]
+          },
+          "type": "SetVariable",
+          "inputs": {
+            "name": "NextLink",
+            "value": "@if(empty(body('GetMembersPage')?['@odata.nextLink']),'',body('GetMembersPage')?['@odata.nextLink'])"
+          }
+        }
+      },
+      "runAfter": {
+        "Initialize_DisableBatchError": [
+          "Succeeded"
+        ]
+      },
+      "expression": "@or(equals(variables('NextLink'),''),equals(variables('HasApiError'),true))",
+      "limit": {
+        "count": 500,
+        "timeout": "PT30M"
+      },
+      "type": "Until"
+    },
+    "Initialize_OriginalMembersCount": {
+      "runAfter": {
+        "Do_Until_All_Pages": [
+          "Succeeded",
+          "Skipped",
+          "Failed",
+          "TimedOut"
+        ]
+      },
+      "type": "InitializeVariable",
+      "inputs": {
+        "variables": [
+          {
+            "name": "OriginalMembersCount",
+            "type": "integer",
+            "value": "@length(variables('AllMembers'))"
+          }
+        ]
+      }
+    },
+    "Check_If_GetMembersPageApiError": {
+      "actions": {
+        "Terminate_OnApiError": {
+          "type": "Terminate",
+          "inputs": {
+            "runStatus": "Failed",
+            "runError": {
+              "message": "@variables('ApiErrorMessage')"
+            }
+          }
+        }
+      },
+      "runAfter": {
+        "Initialize_OriginalMembersCount": [
+          "Succeeded"
+        ]
+      },
+      "else": {
+        "actions": {}
+      },
+      "expression": {
+        "equals": [
+          "@variables('HasApiError')",
+          true
+        ]
+      },
+      "type": "If"
+    },
+    "Check_If_Members_Exist": {
+      "actions": {
+        "Do_Until_Process_All_Batches": {
+          "actions": {
+            "Reset_DisableRequests": {
+              "type": "SetVariable",
+              "inputs": {
+                "name": "DisableRequests",
+                "value": []
+              }
+            },
+            "Select_BatchRequests": {
+              "runAfter": {
+                "Reset_DisableRequests": [
+                  "Succeeded"
+                ]
+              },
+              "type": "Select",
+              "inputs": {
+                "from": "@take(variables('AllMembers'), parameters('BatchSize'))",
+                "select": {
+                  "id": "@item()?['id']",
+                  "method": "GET",
+                  "url": "@concat('/users/', item()?['id'], '?$select=id,displayName,userPrincipalName,mail,externalUserState,createdDateTime,signInActivity,accountEnabled')"
+                }
+              }
+            },
+            "Compose_BatchPayload": {
+              "runAfter": {
+                "Select_BatchRequests": [
+                  "Succeeded"
+                ]
+              },
+              "type": "Compose",
+              "inputs": {
+                "requests": "@body('Select_BatchRequests')"
+              }
+            },
+            "GetUserInfosBatch": {
+              "runAfter": {
+                "Compose_BatchPayload": [
+                  "Succeeded"
+                ]
+              },
+              "type": "Http",
+              "inputs": {
+                "uri": "https://graph.microsoft.com/beta/$batch",
+                "method": "POST",
+                "body": "@outputs('Compose_BatchPayload')",
+                "authentication": {
+                  "type": "ManagedServiceIdentity",
+                  "audience": "https://graph.microsoft.com"
+                },
+                "retryPolicy": {
+                  "type": "exponential",
+                  "count": 3,
+                  "interval": "PT20S"
+                }
+              }
+            },
+            "Check_GetUserInfosBatch_Error": {
+              "actions": {
+                "Check_If_Rate_Limit": {
+                  "actions": {
+                    "Set_Rate_Limit_Flag": {
+                      "type": "SetVariable",
+                      "inputs": {
+                        "name": "HasRateLimit",
+                        "value": true
+                      }
+                    },
+                    "Set_Rate_Limit_Error": {
+                      "type": "SetVariable",
+                      "inputs": {
+                        "name": "ApiErrorMessage",
+                        "value": "@{concat('Graph API rate limit reached after processing ', string(variables('TotalProcessedUsers')), ' users. Retry-After: ', coalesce(outputs('GetUserInfosBatch')?['headers']?['Retry-After'], 'Not specified'))}"
+                      }
+                    }
+                  },
+                  "else": {
+                    "actions": {}
+                  },
+                  "expression": {
+                    "equals": [
+                      "@outputs('GetUserInfosBatch')?['statusCode']",
+                      429
+                    ]
+                  },
+                  "type": "If"
+                }
+              },
+              "runAfter": {
+                "GetUserInfosBatch": [
+                  "Succeeded",
+                  "Failed",
+                  "TimedOut",
+                  "Skipped"
+                ]
+              },
+              "else": {
+                "actions": {}
+              },
+              "expression": {
+                "or": [
+                  {
+                    "not": {
+                      "equals": [
+                        "@outputs('GetUserInfosBatch')?['statusCode']",
+                        200
+                      ]
+                    }
+                  },
+                  {
+                    "equals": [
+                      "@outputs('GetUserInfosBatch')?['statusCode']",
+                      400
+                    ]
+                  },
+                  {
+                    "equals": [
+                      "@outputs('GetUserInfosBatch')?['statusCode']",
+                      401
+                    ]
+                  },
+                  {
+                    "equals": [
+                      "@outputs('GetUserInfosBatch')?['statusCode']",
+                      403
+                    ]
+                  },
+                  {
+                    "equals": [
+                      "@outputs('GetUserInfosBatch')?['statusCode']",
+                      404
+                    ]
+                  },
+                  {
+                    "equals": [
+                      "@outputs('GetUserInfosBatch')?['statusCode']",
+                      409
+                    ]
+                  },
+                  {
+                    "equals": [
+                      "@outputs('GetUserInfosBatch')?['statusCode']",
+                      429
+                    ]
+                  },
+                  {
+                    "equals": [
+                      "@outputs('GetUserInfosBatch')?['statusCode']",
+                      500
+                    ]
+                  },
+                  {
+                    "equals": [
+                      "@outputs('GetUserInfosBatch')?['statusCode']",
+                      503
+                    ]
+                  }
+                ]
+              },
+              "type": "If"
+            },
+            "For_each_BatchResponse": {
+              "foreach": "@body('GetUserInfosBatch')?['responses']",
+              "actions": {
+                "Check_Response_Success": {
+                  "actions": {
+                    "Increment_TotalProcessed": {
+                      "type": "IncrementVariable",
+                      "inputs": {
+                        "name": "TotalProcessedUsers",
+                        "value": 1
+                      }
+                    },
+                    "Process_User_If_Enabled": {
+                      "actions": {
+                        "Evaluate_SignIn_Status": {
+                          "type": "Compose",
+                          "inputs": {
+                            "hasSignIn": "@not(equals(item()?['body']?['signInActivity'], null))",
+                            "lastSignIn": "@coalesce(item()?['body']?['signInActivity']?['lastSuccessfulSignInDateTime'], item()?['body']?['signInActivity']?['lastSignInDateTime'])",
+                            "createdDate": "@item()?['body']?['createdDateTime']",
+                            "userId": "@item()?['body']?['id']",
+                            "displayName": "@item()?['body']?['displayName']",
+                            "userPrincipalName": "@item()?['body']?['userPrincipalName']",
+                            "mail": "@item()?['body']?['mail']"
+                          }
+                        },
+                        "Check_If_Inactive": {
+                          "actions": {
+                            "Add_Inactive_To_Report": {
+                              "type": "AppendToArrayVariable",
+                              "inputs": {
+                                "name": "ReportArray",
+                                "value": {
+                                  "userId": "@outputs('Evaluate_SignIn_Status')?['userId']",
+                                  "displayName": "@outputs('Evaluate_SignIn_Status')?['displayName']",
+                                  "userPrincipalName": "@outputs('Evaluate_SignIn_Status')?['userPrincipalName']",
+                                  "mail": "@outputs('Evaluate_SignIn_Status')?['mail']",
+                                  "lastSignIn": "@outputs('Evaluate_SignIn_Status')?['lastSignIn']",
+                                  "daysSinceLastSignIn": "@div(sub(ticks(utcNow()), ticks(outputs('Evaluate_SignIn_Status')?['lastSignIn'])), 864000000000)",
+                                  "reason": "Inactive - Last sign-in before threshold",
+                                  "actionTaken": "@if(parameters('ReportOnly'),'REPORT ONLY','DISABLED')",
+                                  "timestamp": "@utcNow()"
+                                }
+                              }
+                            },
+                            "Add_Inactive_To_Disable": {
+                              "actions": {
+                                "Append_Disable_Inactive": {
+                                  "type": "AppendToArrayVariable",
+                                  "inputs": {
+                                    "name": "DisableRequests",
+                                    "value": {
+                                      "id": "@concat('disable-', outputs('Evaluate_SignIn_Status')?['userId'])",
+                                      "method": "PATCH",
+                                      "url": "@concat('/users/', outputs('Evaluate_SignIn_Status')?['userId'])",
+                                      "headers": {
+                                        "Content-Type": "application/json"
+                                      },
+                                      "body": {
+                                        "accountEnabled": false,
+                                        "onPremisesExtensionAttributes": {
+                                          "extensionAttribute14": "MarkedEligibleforRemoval",
+                                          "extensionAttribute15": "@utcNow()"
+                                        }
+                                      }
+                                    }
+                                  }
+                                }
+                              },
+                              "runAfter": {
+                                "Add_Inactive_To_Report": [
+                                  "Succeeded"
+                                ]
+                              },
+                              "else": {
+                                "actions": {}
+                              },
+                              "expression": {
+                                "equals": [
+                                  "@parameters('ReportOnly')",
+                                  false
+                                ]
+                              },
+                              "type": "If"
+                            }
+                          },
+                          "runAfter": {
+                            "Evaluate_SignIn_Status": [
+                              "Succeeded"
+                            ]
+                          },
+                          "else": {
+                            "actions": {}
+                          },
+                          "expression": {
+                            "and": [
+                              {
+                                "equals": [
+                                  "@outputs('Evaluate_SignIn_Status')?['hasSignIn']",
+                                  true
+                                ]
+                              },
+                              {
+                                "less": [
+                                  "@outputs('Evaluate_SignIn_Status')?['lastSignIn']",
+                                  "@variables('Threshold')"
+                                ]
+                              }
+                            ]
+                          },
+                          "type": "If"
+                        },
+                        "Check_If_Never_LoggedIn": {
+                          "actions": {
+                            "Add_NeverLoggedIn_To_Report": {
+                              "type": "AppendToArrayVariable",
+                              "inputs": {
+                                "name": "ReportArray",
+                                "value": {
+                                  "userId": "@outputs('Evaluate_SignIn_Status')?['userId']",
+                                  "displayName": "@outputs('Evaluate_SignIn_Status')?['displayName']",
+                                  "userPrincipalName": "@outputs('Evaluate_SignIn_Status')?['userPrincipalName']",
+                                  "mail": "@outputs('Evaluate_SignIn_Status')?['mail']",
+                                  "createdDateTime": "@outputs('Evaluate_SignIn_Status')?['createdDate']",
+                                  "daysSinceCreation": "@div(sub(ticks(utcNow()), ticks(outputs('Evaluate_SignIn_Status')?['createdDate'])), 864000000000)",
+                                  "reason": "Never logged in",
+                                  "actionTaken": "@if(parameters('ReportOnly'),'REPORT ONLY','DISABLED')",
+                                  "timestamp": "@utcNow()"
+                                }
+                              }
+                            },
+                            "Add_NeverLoggedIn_To_Disable": {
+                              "actions": {
+                                "Append_Disable_Never": {
+                                  "type": "AppendToArrayVariable",
+                                  "inputs": {
+                                    "name": "DisableRequests",
+                                    "value": {
+                                      "id": "@concat('disable-', outputs('Evaluate_SignIn_Status')?['userId'])",
+                                      "method": "PATCH",
+                                      "url": "@concat('/users/', outputs('Evaluate_SignIn_Status')?['userId'])",
+                                      "headers": {
+                                        "Content-Type": "application/json"
+                                      },
+                                      "body": {
+                                        "accountEnabled": false,
+                                        "onPremisesExtensionAttributes": {
+                                          "extensionAttribute14": "MarkedEligibleforRemoval",
+                                          "extensionAttribute15": "@utcNow()"
+                                        }
+                                      }
+                                    }
+                                  }
+                                }
+                              },
+                              "runAfter": {
+                                "Add_NeverLoggedIn_To_Report": [
+                                  "Succeeded"
+                                ]
+                              },
+                              "else": {
+                                "actions": {}
+                              },
+                              "expression": {
+                                "equals": [
+                                  "@parameters('ReportOnly')",
+                                  false
+                                ]
+                              },
+                              "type": "If"
+                            }
+                          },
+                          "runAfter": {
+                            "Check_If_Inactive": [
+                              "Succeeded",
+                              "Skipped"
+                            ]
+                          },
+                          "else": {
+                            "actions": {}
+                          },
+                          "expression": {
+                            "and": [
+                              {
+                                "equals": [
+                                  "@outputs('Evaluate_SignIn_Status')?['hasSignIn']",
+                                  false
+                                ]
+                              },
+                              {
+                                "not": {
+                                  "equals": [
+                                    "@outputs('Evaluate_SignIn_Status')?['createdDate']",
+                                    null
+                                  ]
+                                }
+                              },
+                              {
+                                "less": [
+                                  "@outputs('Evaluate_SignIn_Status')?['createdDate']",
+                                  "@variables('Threshold')"
+                                ]
+                              }
+                            ]
+                          },
+                          "type": "If"
+                        }
+                      },
+                      "runAfter": {
+                        "Increment_TotalProcessed": [
+                          "Succeeded"
+                        ]
+                      },
+                      "else": {
+                        "actions": {}
+                      },
+                      "expression": {
+                        "not": {
+                          "equals": [
+                            "@item()?['body']?['accountEnabled']",
+                            false
+                          ]
+                        }
+                      },
+                      "type": "If"
+                    }
+                  },
+                  "else": {
+                    "actions": {}
+                  },
+                  "expression": {
+                    "equals": [
+                      "@item()?['status']",
+                      200
+                    ]
+                  },
+                  "type": "If"
+                }
+              },
+              "runAfter": {
+                "Check_GetUserInfosBatch_Error": [
+                  "Succeeded",
+                  "Skipped",
+                  "Failed",
+                  "TimedOut"
+                ]
+              },
+              "type": "Foreach"
+            },
+            "Check_HasDisableRequests": {
+              "actions": {
+                "Compose_DisableBatchPayload": {
+                  "type": "Compose",
+                  "inputs": {
+                    "requests": "@variables('DisableRequests')"
+                  }
+                },
+                "Execute_DisableBatch": {
+                  "runAfter": {
+                    "Compose_DisableBatchPayload": [
+                      "Succeeded"
+                    ]
+                  },
+                  "type": "Http",
+                  "inputs": {
+                    "uri": "https://graph.microsoft.com/beta/$batch",
+                    "method": "POST",
+                    "body": "@outputs('Compose_DisableBatchPayload')",
+                    "authentication": {
+                      "type": "ManagedServiceIdentity",
+                      "audience": "https://graph.microsoft.com"
+                    },
+                    "retryPolicy": {
+                      "type": "exponential",
+                      "count": 3,
+                      "interval": "PT20S"
+                    }
+                  }
+                },
+                "Parse_Disable_Batch_Response": {
+                  "runAfter": {
+                    "Execute_DisableBatch": [
+                      "Succeeded"
+                    ]
+                  },
+                  "type": "ParseJson",
+                  "inputs": {
+                    "content": "@body('Execute_DisableBatch')",
+                    "schema": {
+                      "type": "object",
+                      "properties": {
+                        "responses": {
+                          "type": "array",
+                          "items": {
+                            "type": "object",
+                            "properties": {
+                              "id": {
+                                "type": "string"
+                              },
+                              "status": {
+                                "type": "integer"
+                              },
+                              "body": {
+                                "type": "object"
+                              }
+                            }
+                          }
+                        }
+                      }
+                    }
+                  }
+                },
+                "Count_Successful_Disables": {
+                  "foreach": "@body('Parse_Disable_Batch_Response')?['responses']",
+                  "actions": {
+                    "Check_If_Disable_Success": {
+                      "actions": {
+                        "Increment_Success_Count": {
+                          "type": "IncrementVariable",
+                          "inputs": {
+                            "name": "SuccessfulDisables",
+                            "value": 1
+                          }
+                        }
+                      },
+                      "else": {
+                        "actions": {
+                          "Set_variable": {
+                            "type": "SetVariable",
+                            "inputs": {
+                              "name": "HasDisableBatchError",
+                              "value": true
+                            }
+                          }
+                        }
+                      },
+                      "expression": {
+                        "equals": [
+                          "@item()?['status']",
+                          200
+                        ]
+                      },
+                      "type": "If"
+                    }
+                  },
+                  "runAfter": {
+                    "Parse_Disable_Batch_Response": [
+                      "Succeeded"
+                    ]
+                  },
+                  "type": "Foreach"
+                }
+              },
+              "runAfter": {
+                "For_each_BatchResponse": [
+                  "Succeeded",
+                  "Skipped",
+                  "Failed",
+                  "TimedOut"
+                ]
+              },
+              "else": {
+                "actions": {
+                  "Skip_DisableBatch": {
+                    "actions": {},
+                    "type": "Scope"
+                  }
+                }
+              },
+              "expression": "@and(not(parameters('ReportOnly')),greater(length(variables('DisableRequests')),0))",
+              "type": "If"
+            },
+            "Check_Execute_DisableBatch_Error": {
+              "actions": {
+                "Check_If_Rate_Limit_Disable": {
+                  "actions": {
+                    "Set_HasTerminateError": {
+                      "type": "SetVariable",
+                      "inputs": {
+                        "name": "HasTerminateError",
+                        "value": true
+                      }
+                    },
+                    "Set_TerminateErrorMessage": {
+                      "type": "SetVariable",
+                      "inputs": {
+                        "name": "TerminateErrorMessage",
+                        "value": "@{concat('Graph API rate limit reached during disable operations after processing ', string(variables('TotalProcessedUsers')), ' users and disabling ', string(variables('SuccessfulDisables')), ' accounts. Please reduce batch size or run again later.')}"
+                      }
+                    }
+                  },
+                  "else": {
+                    "actions": {
+                      "Set_DisableBatchError_Flag": {
+                        "type": "SetVariable",
+                        "inputs": {
+                          "name": "HasDisableBatchError",
+                          "value": true
+                        }
+                      },
+                      "Set_DisableBatchError_Message": {
+                        "runAfter": {
+                          "Set_DisableBatchError_Flag": [
+                            "Succeeded"
+                          ]
+                        },
+                        "type": "SetVariable",
+                        "inputs": {
+                          "name": "TerminateErrorMessage",
+                          "value": "@{concat('Disable batch operation failed with status code ', string(outputs('Execute_DisableBatch')?['statusCode']), '. ', if(equals(outputs('Execute_DisableBatch')?['statusCode'], 403), 'Permission denied - missing User.ReadWrite.All permission.', coalesce(outputs('Execute_DisableBatch')?['body']?['error']?['message'], 'Unknown error')), ' After processing ', string(variables('TotalProcessedUsers')), ' users.')}"
+                        }
+                      }
+                    }
+                  },
+                  "expression": {
+                    "equals": [
+                      "@outputs('Execute_DisableBatch')?['statusCode']",
+                      429
+                    ]
+                  },
+                  "type": "If"
+                }
+              },
+              "runAfter": {
+                "Check_HasDisableRequests": [
+                  "Succeeded",
+                  "Failed",
+                  "TimedOut",
+                  "Skipped"
+                ]
+              },
+              "else": {
+                "actions": {}
+              },
+              "expression": {
+                "and": [
+                  {
+                    "greater": [
+                      "@length(variables('DisableRequests'))",
+                      0
+                    ]
+                  },
+                  {
+                    "not": {
+                      "equals": [
+                        "@parameters('ReportOnly')",
+                        true
+                      ]
+                    }
+                  },
+                  {
+                    "not": {
+                      "equals": [
+                        "@outputs('Execute_DisableBatch')?['statusCode']",
+                        200
+                      ]
+                    }
+                  }
+                ]
+              },
+              "type": "If"
+            },
+            "Set_RemainingMembers": {
+              "runAfter": {
+                "Check_Execute_DisableBatch_Error": [
+                  "Succeeded",
+                  "Skipped",
+                  "Failed",
+                  "TimedOut"
+                ]
+              },
+              "type": "SetVariable",
+              "inputs": {
+                "name": "RemainingMembers",
+                "value": "@skip(variables('AllMembers'), min(parameters('BatchSize'), length(variables('AllMembers'))))"
+              }
+            },
+            "Remove_Processed_Users": {
+              "runAfter": {
+                "Set_RemainingMembers": [
+                  "Succeeded",
+                  "Skipped",
+                  "Failed",
+                  "TimedOut"
+                ]
+              },
+              "type": "SetVariable",
+              "inputs": {
+                "name": "AllMembers",
+                "value": "@variables('RemainingMembers')"
+              }
+            }
+          },
+          "expression": "@or(equals(length(variables('AllMembers')), 0), equals(variables('HasRateLimit'), true), equals(variables('HasTerminateError'), true), equals(variables('HasDisableBatchError'), true))",
+          "limit": {
+            "count": 500,
+            "timeout": "PT2H"
+          },
+          "type": "Until"
+        },
+        "Set_FinalStatus_Success": {
+          "runAfter": {
+            "Do_Until_Process_All_Batches": [
+              "Succeeded"
+            ]
+          },
+          "type": "SetVariable",
+          "inputs": {
+            "name": "FinalStatus",
+            "value": "Success"
+          }
+        }
+      },
+      "runAfter": {
+        "Check_If_GetMembersPageApiError": [
+          "Succeeded",
+          "Skipped",
+          "Failed",
+          "TimedOut"
+        ]
+      },
+      "else": {
+        "actions": {
+          "Set_FinalStatus_NoMembers": {
+            "type": "SetVariable",
+            "inputs": {
+              "name": "FinalStatus",
+              "value": "NoMembers"
+            }
+          }
+        }
+      },
+      "expression": {
+        "greater": [
+          "@length(variables('AllMembers'))",
+          0
+        ]
+      },
+      "type": "If"
+    },
+    "Check_If_Rate_Limit_Occurred": {
+      "actions": {
+        "Terminate_Due_To_Rate_Limit": {
+          "type": "Terminate",
+          "inputs": {
+            "runStatus": "Failed",
+            "runError": {
+              "message": "@variables('ApiErrorMessage')"
+            }
+          }
+        }
+      },
+      "runAfter": {
+        "Check_If_Members_Exist": [
+          "Succeeded",
+          "Skipped",
+          "Failed",
+          "TimedOut"
+        ]
+      },
+      "else": {
+        "actions": {}
+      },
+      "expression": {
+        "equals": [
+          "@variables('HasRateLimit')",
+          true
+        ]
+      },
+      "type": "If"
+    },
+    "Check_If_Terminate_Error_Occurred": {
+      "actions": {
+        "Terminate_Due_To_TerminateError": {
+          "type": "Terminate",
+          "inputs": {
+            "runStatus": "Failed",
+            "runError": {
+              "message": "@variables('TerminateErrorMessage')"
+            }
+          }
+        }
+      },
+      "runAfter": {
+        "Check_If_Rate_Limit_Occurred": [
+          "Succeeded",
+          "Skipped",
+          "Failed",
+          "TimedOut"
+        ]
+      },
+      "else": {
+        "actions": {}
+      },
+      "expression": {
+        "equals": [
+          "@variables('HasTerminateError')",
+          true
+        ]
+      },
+      "type": "If"
+    },
+    "Check_If_DisableBatch_Error_Occurred": {
+      "actions": {
+        "Terminate_Due_To_DisableBatchError": {
+          "type": "Terminate",
+          "inputs": {
+            "runStatus": "Failed",
+            "runError": {
+              "message": "@variables('TerminateErrorMessage')"
+            }
+          }
+        }
+      },
+      "runAfter": {
+        "Check_If_Terminate_Error_Occurred": [
+          "Succeeded",
+          "Skipped"
+        ]
+      },
+      "else": {
+        "actions": {}
+      },
+      "expression": {
+        "equals": [
+          "@variables('HasDisableBatchError')",
+          true
+        ]
+      },
+      "type": "If"
+    },
+    "Generate_JSON_Report": {
+      "runAfter": {
+        "Check_If_DisableBatch_Error_Occurred": [
+          "Succeeded",
+          "Skipped"
+        ]
+      },
+      "type": "Compose",
+      "inputs": {
+        "reportMetadata": {
+          "runId": "@workflow()?['run']?['name']",
+          "runDate": "@formatDateTime(utcNow(),'yyyy-MM-dd HH:mm:ss')",
+          "runDateISO": "@utcNow()",
+          "mode": "@if(parameters('ReportOnly'),'Report Only','Production')",
+          "thresholdDays": "@parameters('InactivityThresholdDays')",
+          "thresholdDate": "@variables('Threshold')",
+          "batchSize": "@parameters('BatchSize')",
+          "totalMembersFound": "@variables('OriginalMembersCount')",
+          "usersAffected": "@length(variables('ReportArray'))",
+          "successfulDisables": "@variables('SuccessfulDisables')",
+          "guestSourceGroupId": "@parameters('guestSourceGroupId')",
+          "finalStatus": "@variables('FinalStatus')"
+        },
+        "summary": {
+          "totalAffectedUsers": "@length(variables('ReportArray'))",
+          "accountsDisabled": "@if(parameters('ReportOnly'),0,variables('SuccessfulDisables'))",
+          "reportOnlyMode": "@parameters('ReportOnly')",
+          "message": "@if(equals(length(variables('ReportArray')),0),'No users found for deactivation.', concat(string(length(variables('ReportArray'))), ' users marked for removal'))"
+        },
+        "affectedUsers": "@variables('ReportArray')",
+        "configuration": {
+          "audience": "https://graph.microsoft.com",
+          "reportOnly": "@parameters('ReportOnly')",
+          "threshold": "@parameters('InactivityThresholdDays')",
+          "batchSize": "@parameters('BatchSize')"
+        }
+      }
+    }
+  }
+}

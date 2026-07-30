@@ -19,6 +19,23 @@ Includes report-only mode, dynamic group examples, and template-driven deploymen
 
 ---
 
+## 📁 Repository Layout
+
+```
+workflows/                                 Workflow definitions — source of truth for behaviour
+  mark-guests-eligible-for-removal.json
+  delete-guests-after-grace-period.json
+infra/
+  main.bicep                               Both Logic Apps, definitions embedded from workflows/
+  modules/logic-app-workflow.bicep         One workflow + system-assigned managed identity
+  main.parameters.json                     Sample parameter file
+  deploy.sh / deploy.ps1                   Deploy + grant Graph app roles, idempotent
+docs/deployment.md                         Deployment guide, first-run guidance, troubleshooting
+scripts/learn-search.py                    Query official Microsoft Learn docs from the CLI
+```
+
+---
+
 ## 🧩 Architecture
 
 This solution consists of two independent Logic Apps:
@@ -49,14 +66,33 @@ This solution consists of two independent Logic Apps:
 
 ## ✅ Prerequisites
 
-- ☁️ Azure subscription with permissions to deploy Logic Apps
-- 🧭 Entra ID tenant with guest users
+> ### ⚠️ Reading `signInActivity` has two hard requirements
+>
+> The Mark Logic App decides who is inactive from the `signInActivity` property on
+> the user object. Reading it requires **both** of the following — miss either one
+> and Microsoft Graph simply omits the property, so no guest is ever identified as
+> inactive:
+>
+> 1. The **`AuditLog.Read.All` application permission**, granted to each Logic App’s
+>    managed identity.
+> 2. A **Microsoft Entra ID P1 or P2 license** in the tenant.
+>
+> Sources: [List users — sign-in activity example](https://learn.microsoft.com/graph/api/user-list?view=graph-rest-1.0#examples) ·
+> [How to detect and investigate inactive user accounts](https://learn.microsoft.com/entra/identity/monitoring-health/howto-manage-inactive-user-accounts)
+
+- ☁️ Azure subscription with permissions to deploy Logic Apps (Contributor)
+- 🧭 Entra ID tenant with guest users, licensed **Microsoft Entra ID P1 or P2**
 - 🧱 Two free extension attributes (e.g., `extensionAttribute14`, `extensionAttribute15`)
-- 🔐 Microsoft Graph API app roles granted to each Logic App’s System-assigned Managed Identity
-  - Read sign-in logs (e.g., `AuditLog.Read.All`)
-  - Read/Write users (e.g., `User.ReadWrite.All`)
-  - Read groups if you scope by group (e.g., `Group.Read.All`)
+- 🔐 Microsoft Graph API app roles granted to **each** Logic App’s System-assigned Managed Identity
+  - `AuditLog.Read.All` — **required**, gates `signInActivity`
+  - `User.ReadWrite.All` — **required**, to disable and delete guests
+  - `GroupMember.Read.All` — required to enumerate the source groups
+- 🛡️ **Privileged Role Administrator** or **Global Administrator** to grant those app roles
 - 🆔 Ability to enable System-assigned Managed Identity
+- 🧰 Azure CLI, plus `jq` if you use the Bash deploy script
+
+📘 Full walkthrough, including the mandatory first run in report-only mode:
+**[docs/deployment.md](docs/deployment.md)**
 
 Note on extension attributes:
 - `extensionAttribute14` → lifecycle flag (“MarkedEligibleforRemoval”)
@@ -113,22 +149,19 @@ Find inactive guest users and mark them for removal.
 
 Parameters
 - `guestSourceGroupId`: Object ID of `GRP_SEC_GuestUserLCM_AllGuests`
-- `Threshold`: Days since last sign-in (default: `180`)
+- `InactivityThresholdDays`: Days since last sign-in (default: `180`)
 - `ReportOnly`: `true` (only report) or `false` (disable + mark)
 - `BatchSize`: Users per run (default: `20`)
 
-Deployment Steps
-1) 🧱 Import template:
-   - Azure Portal → Deploy a custom template → Build your own template in the editor
-   - Paste/upload `Logic-EntraIDGuestLCM-MarkGuestsEligibleforRemoval.json`
-2) 🧾 Fill parameters and deploy.
-3) 🆔 Enable System-assigned Managed Identity:
-   - Logic App → Identity → System-assigned → Status: On → Save
-   - Copy the Object (principal) ID
-4) 🔐 Grant Microsoft Graph permissions:
-   - Use `Logic-EntraIDGuestLCM-MarkGuestsEligibleforRemoval_Azure_CLI_Permissions.sh`
-   - Set `miPrincipalId` to the Managed Identity’s Object (principal) ID
-   - Run in Azure Cloud Shell (Bash) or local `az` CLI
+Deployment — both Logic Apps are deployed together from `infra/`:
+```bash
+./infra/deploy.sh --resource-group rg-entraid-guest-lcm \
+  --all-guests-group-id <guid> --eligible-group-id <guid>
+```
+This creates the resource group, deploys `infra/main.bicep` (both workflows with
+system-assigned managed identities), and grants the Graph app roles to both.
+`ReportOnly` defaults to `true`. See **[docs/deployment.md](docs/deployment.md)**
+for the PowerShell equivalent, partial runs, and how to go live.
 
 🧪 Test & Verify
 - ▶️ Manually run the Logic App once
@@ -166,18 +199,8 @@ Parameters
 - `ReportOnly`: `true` (only report) or `false` (delete users)
 - `BatchSize`: Users per run (default: `20`)
 
-Deployment Steps
-1) 🧱 Import template:
-   - Azure Portal → Deploy a custom template → Build your own template in the editor
-   - Paste/upload `Logic-EntraIDGuestLCM-DeleteGuestUsersAfterGracePeriod.json`
-2) 🧾 Fill parameters and deploy.
-3) 🆔 Enable System-assigned Managed Identity:
-   - Logic App → Identity → System-assigned → Status: On → Save
-   - Copy the Object (principal) ID
-4) 🔐 Grant Microsoft Graph permissions:
-   - Use `Logic-EntraIDGuestLCM-DeleteGuestUsersAfterGracePeriod_AzureCLIPermissions.sh`
-   - Set `miPrincipalId` to the Managed Identity’s Object (principal) ID
-   - Run in Azure Cloud Shell (Bash) or local `az` CLI
+Deployment — deployed by the same `infra/deploy.sh` run as Logic App 1; no
+separate steps. See **[docs/deployment.md](docs/deployment.md)**.
 
 🧪 Test & Verify
 - ▶️ Manually run the Logic App once
@@ -257,8 +280,11 @@ Example (Delete app):
   - Validate `DeletionThresholdDays` logic (compare with `extensionAttribute15` timestamp)
   - Ensure `accountEnabled = false`
 - 🔑 Permission errors:
-  - Re-run the Azure CLI permission scripts with the correct `miPrincipalId`
-  - Verify Graph App Role assignments are “Granted”
+  - Re-assign the Graph app roles: `./infra/deploy.sh --resource-group <rg> --skip-infra`
+  - Verify Graph App Role assignments are “Granted” on **both** managed identities
+  - Confirm the tenant has a Microsoft Entra ID P1/P2 license — without it `signInActivity` is never returned
+
+📘 Full troubleshooting table: **[docs/deployment.md](docs/deployment.md#troubleshooting)**
 
 ---
 
