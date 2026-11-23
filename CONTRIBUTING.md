@@ -112,7 +112,7 @@ and both parts had to fit without adding a level:
 ```
 
 Other limits worth knowing, both with plenty of headroom today: **500 actions per
-workflow** (currently 138 and 111) and an **8,192 character limit per expression**.
+workflow** (currently 144 and 117) and an **8,192 character limit per expression**.
 
 **The validator enforces all of this.** Run it after any change to a workflow
 definition; it exits non-zero on a violation:
@@ -125,10 +125,29 @@ It fails on nesting depth over 8, action count over 500, a `runAfter` pointing a
 non-sibling, a `runAfter` cycle, an invalid `runAfter` status, a parameter that is
 referenced but not declared **or** declared but never used, a variable read before
 the action that initializes it, unbalanced expression parentheses or quotes, an
-expression over 8,192 characters, and any `outputs()` / `body()` / `actions()`
-reference that reaches across a scope boundary. That last rule matters more than it
-sounds: referencing an action inside an `Until` loop from outside it is accepted by
-Azure but silently reads only the final iteration.
+expression over 8,192 characters, a `SetVariable` whose value reads the same
+variable, a `Select` / `Query` `from` or a `Foreach` input that lacks the leading
+`@`, `createArray()` without arguments, and any `outputs()` / `body()` / `actions()`
+reference that reaches across a scope boundary.
+
+The scope rule matters more than it sounds: referencing an action inside an
+`Until` loop from outside it is accepted by Azure but silently reads only the
+final iteration.
+
+The `SetVariable`, missing `@` and `createArray()` rules are not style rules
+either: Azure rejects the first two when the workflow is saved, and
+`createArray()` passes the save but fails the action at runtime. Use these forms
+instead:
+
+```jsonc
+// Instead of SetVariable X = @union(variables('X'), body('Y')):
+"Compose_Aggregate": { "type": "Compose", "inputs": "@union(variables('X'), body('Y'))" },
+"Aggregate":         { "type": "SetVariable", "inputs": { "name": "X", "value": "@outputs('Compose_Aggregate')" },
+                       "runAfter": { "Compose_Aggregate": ["Succeeded"] } }
+
+// An empty array:
+"@coalesce(body('Y')?['value'], json('[]'))"
+```
 
 It also prints notes for scopes with parallel entry points. Those are legal, but
 parallel branches writing the same variable race, so check any you add.

@@ -183,7 +183,7 @@ What is preserved and what changes:
 | --- | --- |
 | Logic App resource | Updated in place, provided you keep the same names. The defaults match the v1 names, so this is automatic unless you renamed them |
 | Managed identity object ID | **Preserved.** The identity is not recreated, so the Graph app roles you already granted stay valid |
-| Existing Graph app role assignments | Detected and skipped. The script only adds what is missing |
+| Existing Graph app role assignments | Detected and skipped. The script adds what is missing (`User.Read.All`, `User.ReadUpdate.All` on Mark) and **warns** about v1 roles that are no longer in the per-identity lists: `User.ReadWrite.All` on Mark, `AuditLog.Read.All`, `User.EnableDisableAccount.All` or `User.DeleteRestore.All` on Delete. Remove them with `--skip-infra --prune-roles` |
 | Run history | Preserved |
 | Workflow definition | Replaced wholesale by the version in `workflows/` |
 | `ReportOnly` | **Reset to `true`** unless you pass `--report-only false`. This is deliberate: validate the new marking conditions before letting them act |
@@ -218,8 +218,13 @@ creating new ones alongside them:
    [The first v2 run will process your entire backlog at once](#-the-first-v2-run-will-process-your-entire-backlog-at-once).
    Investigate any large `expiry` or `never-signed-in` count before proceeding, and
    spot check individual guests by hand.
-5. Set `--report-only false` for the Mark app, leave Delete in report-only for one
-   cycle. Do not adjust `DeletionThresholdDays` to manage the size of the wave.
-6. Set `--report-only false` for the Delete app.
+5. Go live with the Mark app only, leave Delete in report-only for one cycle. Do
+   not adjust `DeletionThresholdDays` to manage the size of the wave:
+   `./infra/deploy.sh --resource-group RG --skip-infra --report-only false --workflow mark`
+6. Go live with the Delete app:
+   `./infra/deploy.sh --resource-group RG --skip-infra --report-only false --workflow delete`
+7. Remove the broader v1 Graph roles:
+   `./infra/deploy.sh --resource-group RG --skip-infra --prune-roles`. Cached
+   managed identity tokens can keep the old roles usable for up to ~24 hours.
 
 Full deployment reference: [deployment.md](deployment.md).

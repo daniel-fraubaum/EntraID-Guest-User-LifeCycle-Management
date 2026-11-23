@@ -151,7 +151,7 @@ Restore-MgDirectoryDeletedItem -DirectoryObjectId "<user-object-id>"
 
 1. **Verify group membership:** Check that marked users appear in `GRP_SEC_GuestUserLCM_EligibleForRemoval`. The dynamic rule requires both `extensionAttribute14 = "MarkedEligibleforRemoval"` **and** `accountEnabled = false`.
 2. **Check grace period:** The `DeletionThresholdDays` must have elapsed since the `extensionAttribute15` timestamp. For the default of 30 days, users must have been marked at least 30 days ago.
-3. **Verify permissions:** Ensure `User.DeleteRestore.All` is granted to Logic App 2's Managed Identity.
+3. **Verify permissions:** Ensure `User.ReadWrite.All` is granted to Logic App 2's Managed Identity. `User.DeleteRestore.All` is not sufficient for `DELETE /users/{id}`.
 
 ### Graph API returns HTTP 429 (rate limiting)
 
@@ -168,6 +168,6 @@ Restore-MgDirectoryDeletedItem -DirectoryObjectId "<user-object-id>"
 
 ### Extension attributes are not being written
 
-1. Verify `User.ReadWrite.All` is granted.
+1. Verify `User.ReadUpdate.All` and `User.EnableDisableAccount.All` are granted to Logic App 1's Managed Identity.
 2. Check that `ReportOnly` is set to `false` - in report-only mode, no attributes are written.
 3. Inspect the Logic App run details for the `Execute_DisableBatch` action to see if it succeeded.
