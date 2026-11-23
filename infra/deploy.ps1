@@ -11,8 +11,18 @@
     replicate asynchronously, so every directory lookup and the role assignment
     itself is retried $RetryAttempts times with $RetryWaitSeconds between tries.
 
+    First installation order matters. A Recurrence trigger fires once as soon as
+    a workflow is created or enabled. If that first run happens before the Graph
+    app roles exist, the managed identity token it obtains carries no roles, and
+    managed identity tokens are cached for up to ~24 hours - the workflows then
+    fail with 403 long after the roles were granted. So on a fresh install the
+    workflows are deployed Disabled, the roles are assigned, and only then are
+    the workflows enabled.
+
     Uses the az CLI (not the Az PowerShell modules) so both scripts behave the
-    same. Requires an authenticated az session.
+    same. Requires an authenticated az session. On Windows az is a .cmd file,
+    which cmd.exe re-parses: JSON bodies are therefore always passed as files,
+    and JMESPath queries are kept free of parentheses and quotes.
 
 .EXAMPLE
     # First deployment, safe by default (ReportOnly = true)
@@ -24,8 +34,8 @@
     ./deploy.ps1 -ResourceGroup rg-guest-lcm -SkipInfra
 
 .EXAMPLE
-    # Go live: flip ReportOnly off without redeploying the workflows
-    ./deploy.ps1 -ResourceGroup rg-guest-lcm -SkipInfra -ReportOnly false
+    # Go live with the Mark app only, Delete stays in report-only mode
+    ./deploy.ps1 -ResourceGroup rg-guest-lcm -SkipInfra -ReportOnly false -Workflow mark
 #>
 [CmdletBinding()]
 param(
@@ -43,16 +53,38 @@ param(
     [string] $ParametersFile,
 
     # Dry-run switch. With -SkipInfra this updates ONLY the ReportOnly parameter
-    # on both existing workflows and leaves the definitions untouched.
+    # on the existing workflows and leaves the definitions untouched.
     [ValidateSet('true', 'false')]
     [string] $ReportOnly,
 
-    # AuditLog.Read.All + User.ReadWrite.All are the two roles the workflows
-    # cannot function without: signInActivity is gated behind AuditLog.Read.All,
-    # and disabling/deleting a guest needs User.ReadWrite.All.
-    # GroupMember.Read.All is included because both definitions enumerate
-    # /groups/{id}/members to find the users to evaluate.
-    [string[]] $Roles = @('AuditLog.Read.All', 'User.ReadWrite.All', 'GroupMember.Read.All'),
+    # Which workflow -SkipInfra -ReportOnly updates. Use it to go live one app
+    # at a time.
+    [ValidateSet('mark', 'delete', 'both')]
+    [string] $Workflow = 'both',
+
+    # Least-privilege Graph app roles, per managed identity.
+    # Mark reads signInActivity (AuditLog.Read.All + User.Read.All), enumerates
+    # the source group (GroupMember.Read.All), writes extensionAttribute14/15
+    # (User.ReadUpdate.All) and sets accountEnabled = false
+    # (User.EnableDisableAccount.All). None of these allows DELETE /users.
+    [string[]] $MarkRoles = @('AuditLog.Read.All', 'GroupMember.Read.All', 'User.Read.All',
+                              'User.ReadUpdate.All', 'User.EnableDisableAccount.All'),
+
+    # Delete enumerates the source group and deletes users, for which
+    # User.ReadWrite.All is the only application permission. It never reads
+    # signInActivity, so it does not get AuditLog.Read.All.
+    [string[]] $DeleteRoles = @('GroupMember.Read.All', 'User.ReadWrite.All'),
+
+    # Same role list for both identities (overrides -MarkRoles / -DeleteRoles).
+    [string[]] $Roles,
+
+    # Remove Graph app roles an identity holds beyond its list, e.g.
+    # User.ReadWrite.All on Mark after a v2.0 install.
+    [switch] $PruneRoles,
+
+    # Enable both workflows after the role assignment. Done automatically on a
+    # fresh install.
+    [switch] $Enable,
 
     [switch] $SkipInfra,
 
@@ -66,14 +98,26 @@ $GraphAppId = '00000003-0000-0000-c000-000000000000'
 $WorkflowApiVersion = '2019-05-01'
 $RetryAttempts = 5
 $RetryWaitSeconds = 15
+# Wait between granting app roles and enabling a workflow, so the first token
+# the workflow requests already carries the roles.
+$EnableDelaySeconds = 120
 $DeploymentName = "entraid-guest-lcm-$([DateTime]::UtcNow.ToString('yyyyMMddHHmmss'))"
+
+if ($Roles) {
+    $MarkRoles = $Roles
+    $DeleteRoles = $Roles
+}
+if ($Workflow -ne 'both' -and (-not $SkipInfra -or -not $ReportOnly)) {
+    throw '-Workflow mark|delete only applies together with -SkipInfra -ReportOnly. A full deployment always sets ReportOnly on both workflows.'
+}
 
 function Write-Section { param([string] $Message) Write-Host "`n==> $Message" -ForegroundColor Cyan }
 function Write-Info    { param([string] $Message) Write-Host "    $Message" }
 function Write-Warn    { param([string] $Message) Write-Warning $Message }
 function Stop-WithError { param([string] $Message) throw $Message }
 
-# Runs an az command, returning trimmed stdout. Retries on failure.
+# Runs an az command, returning trimmed stdout. Retries on failure, and puts the
+# last stderr line of a failed attempt into the warning.
 function Invoke-WithRetry {
     param(
         [Parameter(Mandatory)] [string] $Description,
@@ -83,22 +127,42 @@ function Invoke-WithRetry {
         # body is retried instead of being passed on as an empty id.
         [switch] $RequireOutput
     )
+    # Native stderr must not become a terminating error (Windows PowerShell 5.1
+    # does that under 'Stop' when stderr is redirected); the exit code decides.
+    $ErrorActionPreference = 'Continue'
     for ($attempt = 1; $attempt -le $RetryAttempts; $attempt++) {
-        $output = & az @AzArgs 2>$null
-        $joined = ($output | Out-String).Trim()
-        if ($LASTEXITCODE -eq 0 -and (-not $RequireOutput -or ($joined -and $joined -ne 'null'))) {
+        $combined = & az @AzArgs 2>&1
+        $exitCode = $LASTEXITCODE
+        $stdout = @($combined | Where-Object { $_ -isnot [System.Management.Automation.ErrorRecord] })
+        $stderr = @($combined | Where-Object { $_ -is [System.Management.Automation.ErrorRecord] } |
+                    ForEach-Object { "$_".Trim() } | Where-Object { $_ })
+        $joined = ($stdout | Out-String).Trim()
+        if ($exitCode -eq 0 -and (-not $RequireOutput -or ($joined -and $joined -ne 'null'))) {
             return $joined
         }
-        if ($RequireOutput -and $LASTEXITCODE -eq 0) {
-            Write-Warn "$Description returned nothing yet (attempt $attempt/$RetryAttempts)."
+        $detail = if ($stderr.Count -gt 0) {
+            $last = $stderr[-1]
+            ': ' + $last.Substring(0, [Math]::Min(300, $last.Length))
+        } else { '' }
+        if ($RequireOutput -and $exitCode -eq 0) {
+            Write-Warn "$Description returned nothing yet (attempt $attempt/$RetryAttempts)$detail."
         }
         else {
-            Write-Warn "$Description failed (attempt $attempt/$RetryAttempts)."
+            Write-Warn "$Description failed (attempt $attempt/$RetryAttempts)$detail."
         }
         if ($attempt -eq $RetryAttempts) { return $null }
         Start-Sleep -Seconds $RetryWaitSeconds
     }
     return $null
+}
+
+# Writes a JSON body to a BOM-less temp file and returns its path. az.cmd strips
+# the quotes out of JSON passed as an argument, so bodies always go via a file.
+function New-JsonBodyFile {
+    param([Parameter(Mandatory)] [string] $Json)
+    $path = [System.IO.Path]::GetTempFileName()
+    [System.IO.File]::WriteAllText($path, $Json, (New-Object System.Text.UTF8Encoding($false)))
+    return $path
 }
 
 function Assert-Id {
@@ -127,6 +191,9 @@ Write-Info "Subscription: $AccountName"
 
 # --- infrastructure ----------------------------------------------------------
 
+$FreshInstall = $false
+$DesiredState = 'Enabled'
+
 if ($SkipInfra) {
     Write-Section 'Skipping infrastructure (-SkipInfra)'
 }
@@ -143,6 +210,25 @@ else {
     if ($LASTEXITCODE -ne 0) { Stop-WithError "Could not create resource group $ResourceGroup." }
     Write-Info 'Resource group ready.'
 
+    # No workflow in the resource group yet means a fresh install: deploy the
+    # workflows Disabled so their first run cannot happen before the roles exist.
+    $existingJson = Invoke-WithRetry -Description 'Listing existing Logic Apps' `
+        -AzArgs @('resource', 'list', '--resource-group', $ResourceGroup,
+                  '--resource-type', 'Microsoft.Logic/workflows', '--query', '[].name', '-o', 'json')
+    if ($null -eq $existingJson) { Stop-WithError "Could not list the Logic Apps in $ResourceGroup." }
+    $existingCount = if ($existingJson) { @($existingJson | ConvertFrom-Json).Count } else { 0 }
+    if ($existingCount -eq 0) {
+        $FreshInstall = $true
+        if ($ParametersFile) {
+            $file = Get-Content $ParametersFile -Raw | ConvertFrom-Json
+            $fileParameters = if ($file.PSObject.Properties.Name -contains 'parameters') { $file.parameters } else { $null }
+            if ($fileParameters -and $fileParameters.PSObject.Properties.Name -contains 'workflowState') {
+                $DesiredState = [string] $fileParameters.workflowState.value
+            }
+        }
+        Write-Info 'Fresh install: deploying the workflows Disabled; they are enabled after the Graph app roles are assigned.'
+    }
+
     $deployArgs = @(
         'deployment', 'group', 'create',
         '--resource-group', $ResourceGroup,
@@ -154,6 +240,7 @@ else {
     if ($AllGuestsGroupId) { $deployArgs += @('--parameters', "allGuestsGroupId=$AllGuestsGroupId") }
     if ($EligibleGroupId)  { $deployArgs += @('--parameters', "eligibleForRemovalGroupId=$EligibleGroupId") }
     if ($ReportOnly)       { $deployArgs += @('--parameters', "reportOnly=$ReportOnly") }
+    if ($FreshInstall)     { $deployArgs += @('--parameters', 'workflowState=Disabled') }
 
     Write-Section 'Deploying main.bicep'
     az @deployArgs --output none
@@ -219,18 +306,91 @@ Write-Info "Delete identity: $DeletePrincipalId"
 
 # --- Microsoft Graph app roles ----------------------------------------------
 
-function Get-ExistingAssignmentId {
-    param(
-        [Parameter(Mandatory)] [string] $PrincipalId,
-        [Parameter(Mandatory)] [string] $AppRoleId,
-        [Parameter(Mandatory)] [string] $GraphSpId
-    )
+$script:RolesChanged = $false
+
+function Get-GraphAssignments {
+    param([Parameter(Mandatory)] [string] $PrincipalId, [Parameter(Mandatory)] [string] $GraphSpId)
     Assert-Id 'Managed identity principalId' $PrincipalId
-    return Invoke-WithRetry -Description "Checking existing assignments on $PrincipalId" `
+    $json = Invoke-WithRetry -Description "Reading existing app role assignments of $PrincipalId" `
         -AzArgs @('rest', '--method', 'GET',
                   '--url', "https://graph.microsoft.com/v1.0/servicePrincipals/$PrincipalId/appRoleAssignments",
-                  '--query', "value[?appRoleId=='$AppRoleId' && resourceId=='$GraphSpId'] | [0].id",
-                  '-o', 'tsv')
+                  '--query', 'value', '-o', 'json')
+    if ($null -eq $json) { Stop-WithError "Could not read existing app role assignments for $PrincipalId." }
+    return @(($json | ConvertFrom-Json) | Where-Object { $_.resourceId -eq $GraphSpId })
+}
+
+function Set-RolesForIdentity {
+    param(
+        [Parameter(Mandatory)] [string] $Label,
+        [Parameter(Mandatory)] [string] $PrincipalId,
+        [Parameter(Mandatory)] [string[]] $RoleNames,
+        [Parameter(Mandatory)] [string] $GraphSpId,
+        [Parameter(Mandatory)] [hashtable] $RoleIdByName,
+        [Parameter(Mandatory)] [hashtable] $RoleNameById
+    )
+    Write-Section "Graph app roles: $Label ($PrincipalId)"
+    $existing = Get-GraphAssignments -PrincipalId $PrincipalId -GraphSpId $GraphSpId
+    $wantedIds = @()
+
+    foreach ($role in $RoleNames) {
+        if (-not $RoleIdByName.ContainsKey($role)) {
+            Stop-WithError "Could not resolve the app role id for $role. Check the spelling."
+        }
+        $appRoleId = $RoleIdByName[$role]
+        Assert-Id "App role id for $role" $appRoleId
+        $wantedIds += $appRoleId
+
+        if (@($existing | Where-Object { $_.appRoleId -eq $appRoleId }).Count -gt 0) {
+            Write-Info "${role}: already assigned - skipping."
+            continue
+        }
+
+        $bodyFile = New-JsonBodyFile -Json (@{
+            principalId = $PrincipalId
+            resourceId  = $GraphSpId
+            appRoleId   = $appRoleId
+        } | ConvertTo-Json -Compress)
+        try {
+            $assigned = Invoke-WithRetry -Description "Assigning $role to $PrincipalId" `
+                -AzArgs @('rest', '--method', 'POST',
+                          '--url', "https://graph.microsoft.com/v1.0/servicePrincipals/$PrincipalId/appRoleAssignments",
+                          '--headers', 'Content-Type=application/json',
+                          '--body', "@$bodyFile")
+        }
+        finally {
+            Remove-Item $bodyFile -ErrorAction SilentlyContinue
+        }
+        if ($null -ne $assigned) {
+            Write-Info "${role}: assigned."
+            $script:RolesChanged = $true
+            continue
+        }
+
+        # A concurrent run may have created it between our check and our POST.
+        $existing = Get-GraphAssignments -PrincipalId $PrincipalId -GraphSpId $GraphSpId
+        if (@($existing | Where-Object { $_.appRoleId -eq $appRoleId }).Count -gt 0) {
+            Write-Info "${role}: already present (created concurrently)."
+        }
+        else {
+            Stop-WithError "Failed to assign $role to $PrincipalId. See the warning above; a 403 means you need Privileged Role Administrator or Global Administrator."
+        }
+    }
+
+    # Roles held beyond the list, e.g. User.ReadWrite.All on Mark from v2.0.
+    foreach ($assignment in $existing) {
+        if ($wantedIds -contains $assignment.appRoleId) { continue }
+        $assignedName = if ($RoleNameById.ContainsKey($assignment.appRoleId)) { $RoleNameById[$assignment.appRoleId] } else { $assignment.appRoleId }
+        if ($PruneRoles) {
+            $removed = Invoke-WithRetry -Description "Removing $assignedName from $PrincipalId" `
+                -AzArgs @('rest', '--method', 'DELETE',
+                          '--url', "https://graph.microsoft.com/v1.0/servicePrincipals/$PrincipalId/appRoleAssignments/$($assignment.id)")
+            if ($null -eq $removed) { Stop-WithError "Failed to remove $assignedName from $PrincipalId." }
+            Write-Info "${assignedName}: removed (-PruneRoles). Cached tokens can keep it usable for up to ~24 hours."
+        }
+        else {
+            Write-Warn "$Label identity also holds $assignedName, which is not in its role list. Re-run with -PruneRoles to remove it."
+        }
+    }
 }
 
 function Set-GraphAppRoles {
@@ -239,6 +399,18 @@ function Set-GraphAppRoles {
     if (-not $graphSpId) { Stop-WithError 'Microsoft Graph service principal not found in this tenant.' }
     Assert-Id 'Microsoft Graph service principal objectId' $graphSpId
     Write-Info "Microsoft Graph SP: $graphSpId"
+
+    $appRolesJson = Invoke-WithRetry -Description 'Reading the Microsoft Graph app roles' -RequireOutput `
+        -AzArgs @('ad', 'sp', 'show', '--id', $GraphAppId, '--query', 'appRoles', '-o', 'json')
+    if (-not $appRolesJson) { Stop-WithError 'Could not read the Microsoft Graph app roles.' }
+    $roleIdByName = @{}
+    $roleNameById = @{}
+    foreach ($appRole in ($appRolesJson | ConvertFrom-Json)) {
+        if (@($appRole.allowedMemberTypes) -contains 'Application') {
+            $roleIdByName[[string] $appRole.value] = [string] $appRole.id
+            $roleNameById[[string] $appRole.id] = [string] $appRole.value
+        }
+    }
 
     # A brand-new workflow's identity may not be queryable as a service
     # principal for a few seconds after ARM returns. Wait for both.
@@ -251,52 +423,10 @@ function Set-GraphAppRoles {
         }
     }
 
-    foreach ($role in $Roles) {
-        Write-Section "Graph app role: $role"
-
-        $appRoleId = Invoke-WithRetry -Description "Resolving app role id for $role" -RequireOutput `
-            -AzArgs @('ad', 'sp', 'show', '--id', $GraphAppId,
-                      '--query', "appRoles[?value=='$role' && contains(allowedMemberTypes,'Application')].id | [0]",
-                      '-o', 'tsv')
-        if (-not $appRoleId) { Stop-WithError "Could not resolve the app role id for $role. Check the spelling." }
-        Assert-Id "App role id for $role" $appRoleId
-        Write-Info "Role id: $appRoleId"
-
-        foreach ($principal in @($MarkPrincipalId, $DeletePrincipalId)) {
-            Assert-Id 'Managed identity principalId' $principal
-
-            $existing = Get-ExistingAssignmentId -PrincipalId $principal -AppRoleId $appRoleId -GraphSpId $graphSpId
-            if ($existing -and $existing -ne 'null') {
-                Write-Info "$principal already has $role - skipping."
-                continue
-            }
-
-            $body = @{
-                principalId = $principal
-                resourceId  = $graphSpId
-                appRoleId   = $appRoleId
-            } | ConvertTo-Json -Compress
-
-            $assigned = Invoke-WithRetry -Description "Assigning $role to $principal" `
-                -AzArgs @('rest', '--method', 'POST',
-                          '--url', "https://graph.microsoft.com/v1.0/servicePrincipals/$principal/appRoleAssignments",
-                          '--headers', 'Content-Type=application/json',
-                          '--body', $body)
-            if ($null -ne $assigned) {
-                Write-Info "Assigned $role to $principal."
-                continue
-            }
-
-            # A concurrent run may have created it between our check and our POST.
-            $existing = Get-ExistingAssignmentId -PrincipalId $principal -AppRoleId $appRoleId -GraphSpId $graphSpId
-            if ($existing -and $existing -ne 'null') {
-                Write-Info "$role already present on $principal (created concurrently)."
-            }
-            else {
-                Stop-WithError "Failed to assign $role to $principal. You need Privileged Role Administrator or Global Administrator to grant Graph app roles."
-            }
-        }
-    }
+    Set-RolesForIdentity -Label 'Mark' -PrincipalId $MarkPrincipalId -RoleNames $MarkRoles `
+        -GraphSpId $graphSpId -RoleIdByName $roleIdByName -RoleNameById $roleNameById
+    Set-RolesForIdentity -Label 'Delete' -PrincipalId $DeletePrincipalId -RoleNames $DeleteRoles `
+        -GraphSpId $graphSpId -RoleIdByName $roleIdByName -RoleNameById $roleNameById
 }
 
 if ($SkipPermissions) {
@@ -306,31 +436,81 @@ else {
     Set-GraphAppRoles
 }
 
+# --- enable after a fresh install --------------------------------------------
+
+function Get-WorkflowResourceId {
+    param([Parameter(Mandatory)] [string] $WorkflowName)
+    $id = Invoke-WithRetry -Description "Resolving resource id of $WorkflowName" -RequireOutput `
+        -AzArgs @('resource', 'show', '--resource-group', $ResourceGroup, '--name', $WorkflowName,
+                  '--resource-type', 'Microsoft.Logic/workflows', '--query', 'id', '-o', 'tsv')
+    if (-not $id) { Stop-WithError "Could not resolve $WorkflowName." }
+    Assert-Id "Resource id of $WorkflowName" $id
+    return $id
+}
+
+function Enable-Workflows {
+    if ($script:RolesChanged) {
+        Write-Info "Waiting ${EnableDelaySeconds}s so the first token already carries the new app roles."
+        Start-Sleep -Seconds $EnableDelaySeconds
+    }
+    foreach ($name in @($MarkName, $DeleteName)) {
+        $workflowId = Get-WorkflowResourceId -WorkflowName $name
+        $state = Invoke-WithRetry -Description "Reading state of $name" -RequireOutput `
+            -AzArgs @('resource', 'show', '--resource-group', $ResourceGroup, '--name', $name,
+                      '--resource-type', 'Microsoft.Logic/workflows', '--query', 'properties.state', '-o', 'tsv')
+        if ($state -eq 'Enabled') {
+            Write-Info "${name}: already enabled."
+            continue
+        }
+        $enabled = Invoke-WithRetry -Description "Enabling $name" `
+            -AzArgs @('rest', '--method', 'POST',
+                      '--url', "https://management.azure.com$workflowId/enable?api-version=$WorkflowApiVersion")
+        if ($null -eq $enabled) { Stop-WithError "Could not enable $name." }
+        # Enabling fires the Recurrence trigger once, right away.
+        Write-Info "${name}: enabled (its Recurrence trigger runs once now)."
+    }
+}
+
+$wantEnable = $Enable -or ($FreshInstall -and $DesiredState -eq 'Enabled')
+if ($wantEnable) {
+    if ($SkipPermissions) {
+        Write-Warn 'Leaving the workflows Disabled: no Graph app roles were assigned in this run. Assign them, then run: ./deploy.ps1 -ResourceGroup RG -SkipInfra -Enable'
+    }
+    else {
+        Write-Section 'Enabling workflows'
+        if ($ReportOnly -eq 'false') {
+            Write-Warn 'ReportOnly is false: the run fired by enabling the workflows acts for real.'
+        }
+        Enable-Workflows
+    }
+}
+
 # --- ReportOnly-only update --------------------------------------------------
 
 # Flipping the dry-run switch without redeploying: read the workflow, replace
 # exactly one parameter value, PUT it back. The definition is round-tripped
 # unchanged, and identity.type is resent so the managed identity is preserved.
+# A PUT does not fire the Recurrence trigger.
 function Set-ReportOnlyParameter {
     param(
         [Parameter(Mandatory)] [string] $WorkflowName,
         [Parameter(Mandatory)] [ValidateSet('true', 'false')] [string] $Value
     )
 
-    $workflowId = Invoke-WithRetry -Description "Resolving resource id of $WorkflowName" -RequireOutput `
-        -AzArgs @('resource', 'show', '--resource-group', $ResourceGroup, '--name', $WorkflowName,
-                  '--resource-type', 'Microsoft.Logic/workflows', '--query', 'id', '-o', 'tsv')
-    if (-not $workflowId) { Stop-WithError "Could not resolve $WorkflowName." }
-    Assert-Id "Resource id of $WorkflowName" $workflowId
+    $workflowId = Get-WorkflowResourceId -WorkflowName $WorkflowName
 
     $url = "https://management.azure.com$workflowId`?api-version=$WorkflowApiVersion"
     $currentJson = Invoke-WithRetry -Description "Reading $WorkflowName" -RequireOutput `
         -AzArgs @('rest', '--method', 'GET', '--url', $url)
     if (-not $currentJson) { Stop-WithError "Could not read $WorkflowName." }
-    $current = $currentJson | ConvertFrom-Json
+    # -DateKind String (pwsh 7.5+) keeps ISO date strings in the definition as
+    # strings instead of round-tripping them through DateTime.
+    $fromJsonArgs = @{}
+    if ((Get-Command ConvertFrom-Json).Parameters.ContainsKey('DateKind')) { $fromJsonArgs['DateKind'] = 'String' }
+    $current = $currentJson | ConvertFrom-Json @fromJsonArgs
 
     if (-not $current.properties.definition.actions -or
-        $current.properties.definition.actions.PSObject.Properties.Count -eq 0) {
+        @($current.properties.definition.actions.PSObject.Properties).Count -eq 0) {
         Stop-WithError "Refusing to update ${WorkflowName}: its definition read back empty."
     }
 
@@ -359,12 +539,9 @@ function Set-ReportOnlyParameter {
         }
     } | ConvertTo-Json -Depth 100 -Compress
 
-    $temporaryFile = [System.IO.Path]::GetTempFileName()
+    # The definition is far too large for a command-line argument on Windows.
+    $temporaryFile = New-JsonBodyFile -Json $payload
     try {
-        # The definition is far too large for a command-line argument on Windows.
-        # Written without a BOM: az rest rejects a BOM-prefixed JSON body, and
-        # Set-Content -Encoding utf8 adds one on Windows PowerShell 5.1.
-        [System.IO.File]::WriteAllText($temporaryFile, $payload, (New-Object System.Text.UTF8Encoding($false)))
         $updated = Invoke-WithRetry -Description "Updating ReportOnly on $WorkflowName" `
             -AzArgs @('rest', '--method', 'PUT', '--url', $url,
                       '--headers', 'Content-Type=application/json',
@@ -378,9 +555,9 @@ function Set-ReportOnlyParameter {
 }
 
 if ($ReportOnly -and $SkipInfra) {
-    Write-Section "Updating ReportOnly to $ReportOnly (parameter only)"
-    Set-ReportOnlyParameter -WorkflowName $MarkName -Value $ReportOnly
-    Set-ReportOnlyParameter -WorkflowName $DeleteName -Value $ReportOnly
+    Write-Section "Updating ReportOnly to $ReportOnly (parameter only, workflow: $Workflow)"
+    if ($Workflow -in 'mark', 'both')   { Set-ReportOnlyParameter -WorkflowName $MarkName -Value $ReportOnly }
+    if ($Workflow -in 'delete', 'both') { Set-ReportOnlyParameter -WorkflowName $DeleteName -Value $ReportOnly }
 }
 
 Write-Section 'Done'
