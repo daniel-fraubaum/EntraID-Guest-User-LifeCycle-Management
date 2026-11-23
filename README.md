@@ -42,9 +42,11 @@ scripts/learn-search.py                    Query official Microsoft Learn docs f
 
 Two independent Consumption Logic Apps, each with its own system-assigned managed
 identity, each fed by its own dynamic security group. They are deliberately
-separate: the Mark app can disable but never delete, the Delete app can delete but
-never disable, and the handoff between them is a pair of extension attributes on
-the user object rather than shared state.
+separate: the Mark app can disable but never delete, the Delete app deletes but
+never marks, and the handoff between them is a pair of extension attributes on
+the user object rather than shared state. The separation is enforced by the Graph
+app roles, not only by the workflow logic: the Mark identity holds no permission
+that allows `DELETE /users` (see [Permissions](#-permissions-per-managed-identity)).
 
 ```
                  Entra ID tenant
@@ -56,7 +58,7 @@ GRP_SEC_GuestUserLCM_AllGuests      GRP_SEC_GuestUserLCM_EligibleForRemoval
    |                                        |
    v                                        v
 Logic App 1: Mark                     Logic App 2: Delete
- Sunday 01:00                          Sunday 03:00
+ Sunday 01:00 UTC                      Sunday 03:00 UTC
  reads  signInActivity                 reads  extensionAttribute14 + 15
         createdDateTime                       accountEnabled
         extensionAttribute13 (expiry)
@@ -70,12 +72,12 @@ Logic App 1: Mark                     Logic App 2: Delete
 
 ### Logic App 1: Mark Guests Eligible for Removal
 
-Schedule: weekly, Sunday 01:00. Evaluates every member of the All Guests group
+Schedule: weekly, Sunday 01:00 UTC. Evaluates every member of the All Guests group
 and marks a guest when **any one** of three conditions holds.
 
 | `reasonCode` | `reason` in the report | Condition |
 | --- | --- | --- |
-| `inactivity` | Inactive - Last sign-in before threshold | Has sign-in activity, and the last sign-in is older than `InactivityThresholdDays` |
+| `inactivity` | Inactive - Last sign-in before threshold | Has sign-in activity, and the last **successful** sign-in (`lastSuccessfulSignInDateTime`, interactive or non-interactive, falling back to `lastSignInDateTime`) is older than `InactivityThresholdDays` |
 | `never-signed-in` | Never logged in | No sign-in activity, `createdDateTime` present, and older than **both** `InactivityThresholdDays` **and** `NewAccountGraceDays` |
 | `expiry` | Approved access period expired | `extensionAttribute13` parses as `yyyy-MM-dd` and is before today |
 
@@ -94,7 +96,7 @@ marked, never disabled, regardless of group membership. See
 
 ### Logic App 2: Delete Guests After Grace Period
 
-Schedule: weekly, Sunday 03:00. Evaluates every member of the Eligible For Removal
+Schedule: weekly, Sunday 03:00 UTC. Evaluates every member of the Eligible For Removal
 group and deletes a guest when **all** of the following hold:
 
 - `extensionAttribute14 = "MarkedEligibleforRemoval"`
@@ -177,10 +179,7 @@ Running LCM without VouchGate is fine: leave `extensionAttribute13` unset and th
 - ☁️ Azure subscription with permissions to deploy Logic Apps (Contributor)
 - 🧭 Entra ID tenant with guest users, licensed **Microsoft Entra ID P1 or P2**
 - 🧱 Two free extension attributes (e.g., `extensionAttribute14`, `extensionAttribute15`)
-- 🔐 Microsoft Graph API app roles granted to **each** Logic App’s System-assigned Managed Identity
-  - `AuditLog.Read.All` - **required**, gates `signInActivity`
-  - `User.ReadWrite.All` - **required**, to disable and delete guests
-  - `GroupMember.Read.All` - required to enumerate the source groups
+- 🔐 Microsoft Graph API app roles on each Logic App’s System-assigned Managed Identity, separate per app - see [Permissions per managed identity](#-permissions-per-managed-identity). The deploy scripts assign them.
 - 🛡️ **Privileged Role Administrator** or **Global Administrator** to grant those app roles
 - 🆔 Ability to enable System-assigned Managed Identity
 - 🧰 Azure CLI, plus `jq` if you use the Bash deploy script
@@ -189,6 +188,30 @@ Running LCM without VouchGate is fine: leave `extensionAttribute13` unset and th
 **[docs/deployment.md](docs/deployment.md)**
 
 📋 Extension attributes: see [Extension Attribute Contract](#-extension-attribute-contract).
+
+### 🔐 Permissions per managed identity
+
+Each identity gets only what its own job needs. Microsoft Graph has no
+application permission that allows `DELETE /users` other than
+`User.ReadWrite.All`, so keeping that role off the Mark identity is what makes
+"Mark never deletes" a property of the permissions rather than of the workflow.
+
+| App role | Mark | Delete | Why |
+| --- | :---: | :---: | --- |
+| `AuditLog.Read.All` | ✅ | | Gates `signInActivity`; without it Graph omits the property |
+| `User.Read.All` | ✅ | | Read users, together with `AuditLog.Read.All` for `signInActivity` |
+| `GroupMember.Read.All` | ✅ | ✅ | Enumerate `/groups/{id}/members` |
+| `User.ReadUpdate.All` | ✅ | | `PATCH /users/{id}` for `extensionAttribute14` / `15`; does not allow delete |
+| `User.EnableDisableAccount.All` | ✅ | | Set `accountEnabled = false` |
+| `User.ReadWrite.All` | | ✅ | `DELETE /users/{id}`; the only application permission that allows it |
+
+Sources: [Update user - permissions](https://learn.microsoft.com/graph/api/user-update?view=graph-rest-1.0#permissions) ·
+[Delete user - permissions](https://learn.microsoft.com/graph/api/user-delete?view=graph-rest-1.0#permissions)
+
+Installed v2.0 before this split? Both identities then still hold
+`User.ReadWrite.All` (and Delete holds `AuditLog.Read.All`). The deploy scripts
+warn about it; remove the extras with
+`./infra/deploy.sh --resource-group RG --skip-infra --prune-roles`.
 
 ### 🚫 How exclusion actually works
 
@@ -285,8 +308,17 @@ Useful partial runs:
 | Goal | Command |
 | --- | --- |
 | Re-assign Graph roles only | `./infra/deploy.sh --resource-group RG --skip-infra` |
-| Infrastructure only, roles later | `./infra/deploy.sh --resource-group RG ... --skip-permissions` |
-| Flip the dry-run switch only | `./infra/deploy.sh --resource-group RG --skip-infra --report-only false` |
+| Remove roles beyond the per-identity lists | `./infra/deploy.sh --resource-group RG --skip-infra --prune-roles` |
+| Infrastructure only, roles later | `./infra/deploy.sh --resource-group RG ... --skip-permissions`, then `--skip-infra --enable` |
+| Go live with one app only | `./infra/deploy.sh --resource-group RG --skip-infra --report-only false --workflow mark` |
+| Flip the dry-run switch on both | `./infra/deploy.sh --resource-group RG --skip-infra --report-only false` |
+
+On a **fresh install** the scripts deploy both workflows Disabled, assign the
+Graph app roles, wait two minutes and only then enable them. A Recurrence trigger
+fires once the moment a workflow is created or enabled; if that run happens
+before the roles exist, the managed identity caches a token without them for up
+to ~24 hours and every run fails with `403`. Enabling therefore starts one
+report-only run of each app right away, which is expected.
 
 📘 Full walkthrough: **[docs/deployment.md](docs/deployment.md)**
 
@@ -320,14 +352,17 @@ In report-only mode both apps evaluate every guest and report exactly what they
    - spot check a handful of UPNs by hand against the Entra ID sign-in logs
 4. **Repeat for the Delete app**, whose report should list only guests that the
    Mark app tagged at least `DeletionThresholdDays` ago.
-5. **Go live**, one app at a time:
+5. **Go live**, one app at a time. Mark first:
 
    ```bash
-   ./infra/deploy.sh --resource-group rg-entraid-guest-lcm --skip-infra --report-only false
+   ./infra/deploy.sh --resource-group rg-entraid-guest-lcm --skip-infra --report-only false --workflow mark
    ```
 
-   Leaving the Delete app in report-only for a full extra cycle after the Mark app
-   goes live is the cautious path.
+   Leave the Delete app in report-only for a full extra cycle, then:
+
+   ```bash
+   ./infra/deploy.sh --resource-group rg-entraid-guest-lcm --skip-infra --report-only false --workflow delete
+   ```
 
 ---
 
@@ -371,7 +406,7 @@ Two notes on semantics:
 
 Find inactive guest users and mark them for removal.
 
-- ⏱️ Suggested schedule: Weekly, Sunday 01:00
+- ⏱️ Suggested schedule: Weekly, Sunday 01:00 UTC
 - 🔎 Evaluation:
   - Check all members of `GRP_SEC_GuestUserLCM_AllGuests`
   - Fetch sign-in activity and extension attributes via Microsoft Graph
@@ -379,7 +414,7 @@ Find inactive guest users and mark them for removal.
 
 | `reasonCode` | `reason` | Condition |
 | --- | --- | --- |
-| `inactivity` | Inactive - Last sign-in before threshold | Has sign-in activity, and last sign-in older than `InactivityThresholdDays` |
+| `inactivity` | Inactive - Last sign-in before threshold | Has sign-in activity, and last successful sign-in (interactive or non-interactive) older than `InactivityThresholdDays` |
 | `never-signed-in` | Never logged in | No sign-in activity, `createdDateTime` present, and older than **both** `InactivityThresholdDays` **and** `NewAccountGraceDays` |
 | `expiry` | Approved access period expired | `extensionAttribute13` parses as `yyyy-MM-dd` and is before today |
 
@@ -424,7 +459,7 @@ for the PowerShell equivalent, partial runs, and how to go live.
 - 👀 Check:
   - `GRP_SEC_GuestUserLCM_AllGuests` contains active guests to evaluate
   - `GRP_SEC_GuestUserLCM_EligibleForRemoval` starts filling with disabled, marked users
-  - Run output includes the report array (e.g., `ReportArray`)
+  - The `Generate_JSON_Report` action holds the report - see [Reports](#-reports)
 
 ---
 
@@ -432,7 +467,7 @@ for the PowerShell equivalent, partial runs, and how to go live.
 
 Delete previously marked guest users after a grace period.
 
-- ⏱️ Suggested schedule: Weekly, Sunday 03:00
+- ⏱️ Suggested schedule: Weekly, Sunday 03:00 UTC
 - 🔎 Evaluation:
   - Check all members of `GRP_SEC_GuestUserLCM_EligibleForRemoval`
   - Read user attributes via Microsoft Graph
@@ -463,7 +498,7 @@ separate steps. See **[docs/deployment.md](docs/deployment.md)**.
 - 👀 Check:
   - `GRP_SEC_GuestUserLCM_EligibleForRemoval` shrinks as users are deleted
   - Entra ID → Users → Deleted users shows newly deleted accounts
-  - Run output includes `DeletedUsersReport`
+  - The `Generate_Final_Report` action holds the report - see [Reports](#-reports)
 
 ---
 
@@ -716,8 +751,9 @@ aggressive for your tenant. Lower it and redeploy.
 ## ⏱️ Scheduling Guidance
 
 - ⛓️ Stagger runs to allow propagation:
-  - Mark app: Sunday 01:00
-  - Delete app: Sunday 03:00
+  - Mark app: Sunday 01:00 UTC
+  - Delete app: Sunday 03:00 UTC
+- 🌍 The Recurrence triggers set no `timeZone`, so the times are UTC.
 - 🕒 Adjust to your maintenance windows and dynamic group evaluation delays.
 
 ---
@@ -745,6 +781,7 @@ aggressive for your tenant. Lower it and redeploy.
 - 🔑 Permission errors:
   - Re-assign the Graph app roles: `./infra/deploy.sh --resource-group <rg> --skip-infra`
   - Verify Graph App Role assignments are “Granted” on **both** managed identities
+  - `403` although the roles are assigned: the managed identity is using a cached token from before the assignment. Those are kept for up to ~24 hours and cannot be refreshed. Wait, or delete the two workflows and redeploy, which creates new identities in the right order
   - Confirm the tenant has a Microsoft Entra ID P1/P2 license - without it `signInActivity` is never returned
 
 📘 Full troubleshooting table: **[docs/deployment.md](docs/deployment.md#troubleshooting)**
@@ -769,6 +806,7 @@ Short version:
 - Redeploying with `infra/deploy.sh` **updates your existing Logic Apps in place.** The managed identity object IDs are preserved, so the Graph app roles you already granted stay valid, and run history is kept.
 - Everything previously hardcoded in the workflow JSON is now a deployment parameter. The one rename is `Threshold` to `InactivityThresholdDays`.
 - `ReportOnly` is reset to `true` on redeploy unless you pass `--report-only false`. That is deliberate: validate the new marking conditions before letting them act.
+- The Graph app roles are now separate per identity. Your existing identities keep the v1 roles (including `User.ReadWrite.All` on Mark) until you run `./infra/deploy.sh --resource-group RG --skip-infra --prune-roles`.
 - ⚠️ **v1 misclassified every successful disable as an error.** Graph returns `204` for `PATCH /users/{id}` and v1 checked for `200`, so v1 runs with `ReportOnly = false` reported `accountsDisabled: 0`, terminated as Failed with an empty error message, produced no report, and stopped after the first batch. **Accounts were still disabled correctly** - only the classification was wrong. Details and what to do about your v1 history are in the migration note.
 - ⚠️ **Because v1 stopped after the first batch, you probably have a backlog.** The first v2 run processes **the entire backlog in one execution**, so the totals will likely be many times your familiar weekly numbers. That is the v1 bug being corrected, not a v2 error. Run with `ReportOnly = true`, review the totals, and only then enable enforcement. Adjusting `DeletionThresholdDays` is **not** the lever; reviewing the report is.
 

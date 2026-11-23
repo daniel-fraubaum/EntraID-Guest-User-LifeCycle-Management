@@ -1,10 +1,30 @@
 # Permissions Reference
 
-This document provides a complete reference of all Microsoft Graph API permissions required by each Logic App, including their purpose and how they are used.
+This document lists the Microsoft Graph application permissions each Logic App's
+managed identity receives, why each one is needed, and which Graph calls use it.
 
 ## Overview
 
-Both Logic Apps use **System-assigned Managed Identities** to authenticate against the Microsoft Graph API. Permissions are granted as **application-level** app role assignments (not delegated), meaning they operate without user context.
+Both Logic Apps use **System-assigned Managed Identities** to authenticate against
+Microsoft Graph. Permissions are granted as **application** app role assignments
+(not delegated), so they work without a signed-in user.
+
+The two identities get **different** role sets. Microsoft Graph has exactly one
+application permission that allows `DELETE /users/{id}`: `User.ReadWrite.All`.
+The Mark identity does not receive it, so "Mark can disable but never delete" is
+enforced by the directory, not only by the workflow logic.
+
+| App role | Mark | Delete |
+| --- | :---: | :---: |
+| `AuditLog.Read.All` | ✅ | |
+| `User.Read.All` | ✅ | |
+| `GroupMember.Read.All` | ✅ | ✅ |
+| `User.ReadUpdate.All` | ✅ | |
+| `User.EnableDisableAccount.All` | ✅ | |
+| `User.ReadWrite.All` | | ✅ |
+
+`infra/deploy.sh` / `infra/deploy.ps1` assign these by default. Override them with
+`--mark-roles` / `--delete-roles` (`-MarkRoles` / `-DeleteRoles`).
 
 ---
 
@@ -12,20 +32,21 @@ Both Logic Apps use **System-assigned Managed Identities** to authenticate again
 
 ### Required Permissions
 
-| Permission | Type | Purpose | Graph API Calls |
-|------------|------|---------|-----------------|
-| `GroupMember.Read.All` | Application | Read group membership to enumerate guest users | `GET /groups/{id}/members` |
-| `User.ReadWrite.All` | Application | Read user profiles (sign-in activity, extension attributes) and write extension attributes (`extensionAttribute14`, `extensionAttribute15`) | `GET /users/{id}` (via batch), `PATCH /users/{id}` (via batch) |
-| `AuditLog.Read.All` | Application | Access `signInActivity` property on user objects (requires this permission even when reading via `/users` endpoint) | Included in `GET /users/{id}?$select=signInActivity` |
-| `User.EnableDisableAccount.All` | Application | Set `accountEnabled = false` to disable inactive guest accounts | Included in `PATCH /users/{id}` body |
+| Permission | Purpose | Graph API Calls |
+|------------|---------|-----------------|
+| `GroupMember.Read.All` | Enumerate the members of the All Guests group | `GET /groups/{id}/members` |
+| `User.Read.All` | Read user profiles, extension attributes and `createdDateTime` | `GET /users/{id}` (via batch) |
+| `AuditLog.Read.All` | Return the `signInActivity` property. Without it Graph omits the property, even with `User.Read.All` | `GET /users/{id}?$select=signInActivity` |
+| `User.ReadUpdate.All` | Write `extensionAttribute14` / `extensionAttribute15`. Least privileged application permission for `PATCH /users/{id}`; it does **not** allow deleting users | `PATCH /users/{id}` (via batch) |
+| `User.EnableDisableAccount.All` | Set `accountEnabled = false`. Least privileged permission for that property, together with `User.Read.All` | `PATCH /users/{id}` (via batch) |
 
 ### Graph API Calls Made
 
-| Action | Method | Endpoint | Authentication |
-|--------|--------|----------|----------------|
-| Get group members (paginated) | `GET` | `/v1.0/groups/{groupId}/members?$select=id&$top=999` | Managed Identity |
-| Get user details (batch) | `POST` | `/beta/$batch` containing `GET /users/{id}?$select=id,displayName,userPrincipalName,mail,externalUserState,createdDateTime,signInActivity,accountEnabled` | Managed Identity |
-| Disable + mark user (batch) | `POST` | `/beta/$batch` containing `PATCH /users/{id}` with body `{accountEnabled: false, onPremisesExtensionAttributes: {extensionAttribute14: "MarkedEligibleforRemoval", extensionAttribute15: "<timestamp>"}}` | Managed Identity |
+| Action | Method | Endpoint |
+|--------|--------|----------|
+| Get group members (paginated) | `GET` | `/v1.0/groups/{groupId}/members?$select=id&$top=999` |
+| Get user details (batch) | `POST` | `$batch` containing `GET /users/{id}?$select=id,displayName,userPrincipalName,mail,externalUserState,createdDateTime,signInActivity,accountEnabled,onPremisesExtensionAttributes` |
+| Disable + mark user (batch) | `POST` | `$batch` containing `PATCH /users/{id}` with body `{accountEnabled: false, onPremisesExtensionAttributes: {extensionAttribute14: "MarkedEligibleforRemoval", extensionAttribute15: "<timestamp>"}}` |
 
 ---
 
@@ -33,63 +54,64 @@ Both Logic Apps use **System-assigned Managed Identities** to authenticate again
 
 ### Required Permissions
 
-| Permission | Type | Purpose | Graph API Calls |
-|------------|------|---------|-----------------|
-| `GroupMember.Read.All` | Application | Read group membership to enumerate marked guest users | `GET /groups/{id}/members` |
-| `User.ReadWrite.All` | Application | Read user profiles including `onPremisesExtensionAttributes` and `accountEnabled` | `GET /users/{id}` (via batch) |
-| `User.DeleteRestore.All` | Application | Permanently delete (soft-delete) user objects from Entra ID | `DELETE /users/{id}` (via batch) |
+| Permission | Purpose | Graph API Calls |
+|------------|---------|-----------------|
+| `GroupMember.Read.All` | Enumerate the members of the Eligible For Removal group | `GET /groups/{id}/members` |
+| `User.ReadWrite.All` | Read `onPremisesExtensionAttributes` and `accountEnabled`, and delete the user. The only application permission for `DELETE /users/{id}` | `GET /users/{id}`, `DELETE /users/{id}` (via batch) |
+
+The Delete workflow never reads `signInActivity`, so it does not need
+`AuditLog.Read.All`. `User.DeleteRestore.All` is **not** sufficient for
+`DELETE /users/{id}`; the API documents `User.ReadWrite.All` as the only
+application permission.
 
 ### Graph API Calls Made
 
-| Action | Method | Endpoint | Authentication |
-|--------|--------|----------|----------------|
-| Get group members (paginated) | `GET` | `/v1.0/groups/{groupId}/members?$select=id&$top=999` | Managed Identity |
-| Get user details (batch) | `POST` | `/beta/$batch` containing `GET /users/{id}?$select=id,displayName,userPrincipalName,mail,accountEnabled,onPremisesExtensionAttributes` | Managed Identity |
-| Delete user (batch) | `POST` | `/beta/$batch` containing `DELETE /users/{id}` | Managed Identity |
+| Action | Method | Endpoint |
+|--------|--------|----------|
+| Get group members (paginated) | `GET` | `/v1.0/groups/{groupId}/members?$select=id&$top=999` |
+| Get user details (batch) | `POST` | `$batch` containing `GET /users/{id}?$select=id,displayName,userPrincipalName,mail,accountEnabled,onPremisesExtensionAttributes` |
+| Delete user (batch) | `POST` | `$batch` containing `DELETE /users/{id}` |
+
+Neither application permission is enough to disable or delete a user who holds a
+privileged administrator role; such users would show up in `errors[]` with `403`.
+Guests normally hold no admin roles.
+
+Sources:
+[Update user - permissions](https://learn.microsoft.com/graph/api/user-update?view=graph-rest-1.0#permissions) ·
+[Delete user - permissions](https://learn.microsoft.com/graph/api/user-delete?view=graph-rest-1.0#permissions) ·
+[List users - signInActivity](https://learn.microsoft.com/graph/api/user-list?view=graph-rest-1.0#examples)
 
 ---
 
 ## Permission Assignment
 
-Permissions are assigned using the Azure CLI scripts provided in the repository. The scripts:
+The deploy scripts:
 
-1. Resolve the Microsoft Graph service principal (`appId: 00000003-0000-0000-c000-000000000000`).
-2. Validate that the Managed Identity exists.
-3. Look up the `appRoleId` for each permission string.
-4. Create `appRoleAssignment` entries via the Graph API.
+1. Resolve the Microsoft Graph service principal (`appId: 00000003-0000-0000-c000-000000000000`) and its application app roles.
+2. Wait until both managed identities are visible in the directory.
+3. Assign each identity its own role list, skipping roles already present.
+4. Warn about roles an identity holds beyond its list, or remove them with `--prune-roles` / `-PruneRoles`.
+5. On a fresh install, enable the workflows only after the roles are assigned (see below).
 
-> **⚠️ The two per-workflow permission scripts below have been removed.**
-> `infra/deploy.sh` / `infra/deploy.ps1` now assign the app roles to **both**
-> managed identities in one idempotent, retrying run. The role lists below are
-> retained as a record of what the original scripts granted; the deploy scripts
-> grant `AuditLog.Read.All`, `User.ReadWrite.All` and `GroupMember.Read.All` by
-> default, overridable with `--roles` / `-Roles`. See
-> [deployment.md](deployment.md#microsoft-graph-application-permissions).
+### Role timing and token caching
 
-### Script: Mark Logic App Permissions
+Managed identity tokens are cached by Azure for up to ~24 hours and cannot be
+refreshed on demand. A token obtained **before** a role was assigned keeps failing
+with `403`; a role **removed** with `--prune-roles` may keep working until the
+cached token expires. Because a Recurrence trigger fires once when a workflow is
+created or enabled, the scripts deploy a fresh install Disabled and enable it
+only after the role assignment. See
+[Limitation of using managed identities for authorization](https://learn.microsoft.com/entra/identity/managed-identities-azure-resources/managed-identity-best-practice-recommendations#limitation-of-using-managed-identities-for-authorization).
 
-**File:** `Logic-EntraIDGuestLCM-MarkGuestsEligibleforRemoval_Azure_CLI_Permissions.sh` *(removed)*
+### Upgrading from earlier role sets
 
-```bash
-graphPermissions=(
-  "GroupMember.Read.All"
-  "User.ReadWrite.All"
-  "AuditLog.Read.All"
-  "User.EnableDisableAccount.All"
-)
-```
+| Installed with | Mark held | Delete held | Run once |
+| --- | --- | --- | --- |
+| v1 permission scripts | `GroupMember.Read.All`, `User.ReadWrite.All`, `AuditLog.Read.All`, `User.EnableDisableAccount.All` | `GroupMember.Read.All`, `User.ReadWrite.All`, `User.DeleteRestore.All` | `./infra/deploy.sh --resource-group RG --skip-infra --prune-roles` |
+| v2.0 deploy scripts before the split | `AuditLog.Read.All`, `User.ReadWrite.All`, `GroupMember.Read.All` | the same | the same |
 
-### Script: Delete Logic App Permissions
-
-**File:** `Logic-EntraIDGuestLCM-DeleteGuestUsersAfterGracePeriod_AzureCLIPermissions.sh` *(removed)*
-
-```bash
-graphPermissions=(
-  "GroupMember.Read.All"
-  "User.ReadWrite.All"
-  "User.DeleteRestore.All"
-)
-```
+The v1 per-workflow permission scripts
+(`Logic-EntraIDGuestLCM-*_Permissions.sh`) have been removed.
 
 ---
 
@@ -114,22 +136,12 @@ az rest --method GET \
 
 ---
 
-## Least Privilege Considerations
-
-- Both Logic Apps follow the principle of least privilege - only requesting the minimum set of permissions required for their specific function.
-- The two Logic Apps have **separate Managed Identities** with **independent permission sets**, ensuring that the Mark Logic App cannot delete users and the Delete Logic App cannot disable accounts.
-- `AuditLog.Read.All` is only granted to Logic App 1 because only it needs to read `signInActivity`.
-- `User.EnableDisableAccount.All` is only granted to Logic App 1.
-- `User.DeleteRestore.All` is only granted to Logic App 2.
-
----
-
 ## Common Permission Errors
 
 | Error | Cause | Resolution |
 |-------|-------|------------|
-| HTTP 403 on `GET /groups/{id}/members` | Missing `GroupMember.Read.All` | Re-run the permission script and verify admin consent. |
-| HTTP 403 on `PATCH /users/{id}` | Missing `User.ReadWrite.All` or `User.EnableDisableAccount.All` | Re-run the permission script for Logic App 1. |
-| HTTP 403 on `DELETE /users/{id}` | Missing `User.DeleteRestore.All` | Re-run the permission script for Logic App 2. |
-| `signInActivity` returns `null` for all users | Missing `AuditLog.Read.All` | Grant `AuditLog.Read.All` to Logic App 1's Managed Identity. |
-| `"Insufficient privileges to complete the operation"` | Permissions not admin-consented | A Global Admin must grant admin consent in the Entra admin center. |
+| HTTP 403 on `GET /groups/{id}/members` | Missing `GroupMember.Read.All`, or a token cached from before the assignment | `./infra/deploy.sh --resource-group RG --skip-infra`; if the role is present, see [Role timing](#role-timing-and-token-caching) |
+| HTTP 403 on `PATCH /users/{id}` (Mark) | Missing `User.ReadUpdate.All` or `User.EnableDisableAccount.All` | Re-run with `--skip-infra` |
+| HTTP 403 on `DELETE /users/{id}` (Delete) | Missing `User.ReadWrite.All` | Re-run with `--skip-infra` |
+| `signInActivity` missing for all users | Missing `AuditLog.Read.All` on the Mark identity, or no Entra ID P1/P2 license | Grant the role; check licensing |
+| `Failed to assign <role>` during deployment | The account running the script lacks Privileged Role Administrator / Global Administrator | Have an eligible admin re-run with `--skip-infra` |

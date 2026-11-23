@@ -36,17 +36,28 @@ resources - so the deploy scripts do that as a second step.
 
 ### Microsoft Graph application permissions
 
-Both managed identities need these **application** permissions (app roles) on
-Microsoft Graph. `deploy.sh` / `deploy.ps1` assign all three to both identities.
+Each managed identity gets its own set of **application** permissions (app roles)
+on Microsoft Graph. `deploy.sh` / `deploy.ps1` assign them.
 
-| App role | Why it is needed | Required |
-| --- | --- | --- |
-| `AuditLog.Read.All` | Gates the `signInActivity` property. Without it, Graph omits it. | Yes - the solution cannot work without it |
-| `User.ReadWrite.All` | Patch `accountEnabled` + extension attributes (Mark), `DELETE /users/{id}` (Delete) | Yes |
-| `GroupMember.Read.All` | Enumerate `/groups/{id}/members` to get the users to evaluate | Yes for group-scoped operation, which is how both workflows are written |
+| App role | Mark | Delete | Why it is needed |
+| --- | :---: | :---: | --- |
+| `AuditLog.Read.All` | ✅ | | Gates the `signInActivity` property. Without it, Graph omits it and the solution cannot detect inactivity |
+| `User.Read.All` | ✅ | | Read users; together with `AuditLog.Read.All` for `signInActivity` |
+| `GroupMember.Read.All` | ✅ | ✅ | Enumerate `/groups/{id}/members` to get the users to evaluate |
+| `User.ReadUpdate.All` | ✅ | | `PATCH /users/{id}` for `extensionAttribute14` / `15`. Does not allow `DELETE` |
+| `User.EnableDisableAccount.All` | ✅ | | Set `accountEnabled = false` |
+| `User.ReadWrite.All` | | ✅ | `DELETE /users/{id}`. It is the only application permission for that call |
 
-Override the set with `--roles` / `-Roles` if your tenant grants equivalents a
-different way.
+Because the Mark identity never holds `User.ReadWrite.All`, it cannot delete a
+user even if its workflow were changed to try. Sources:
+[Update user](https://learn.microsoft.com/graph/api/user-update?view=graph-rest-1.0#permissions),
+[Delete user](https://learn.microsoft.com/graph/api/user-delete?view=graph-rest-1.0#permissions).
+
+Override the lists with `--mark-roles` / `--delete-roles` (`-MarkRoles` /
+`-DeleteRoles`), or `--roles` / `-Roles` for one list on both. Roles an identity
+holds beyond its list are reported as a warning; `--prune-roles` / `-PruneRoles`
+removes them. Run that once on installations from before the split, where both
+identities hold `User.ReadWrite.All`.
 
 ### Tooling and rights
 
@@ -125,32 +136,58 @@ when it finishes.
 ### What the scripts do
 
 1. Create the resource group if it does not exist.
-2. Deploy `infra/main.bicep` - both workflows, each with a system-assigned managed identity.
+2. Deploy `infra/main.bicep` - both workflows, each with a system-assigned managed identity. On a **fresh install** (no workflow in the resource group yet) they are deployed `Disabled`.
 3. Read both managed identity object IDs from the deployment outputs.
-4. Wait for those identities to appear in the directory, then assign the Graph app roles to **both**, skipping any already present.
+4. Wait for those identities to appear in the directory, then assign each identity its Graph app roles, skipping any already present, and warn about (or with `--prune-roles` remove) roles beyond its list.
+5. On a fresh install: wait 120 seconds, then enable both workflows.
 
 Directory writes replicate asynchronously, so every lookup and the role
-assignment itself retries **up to 5 times with 15 seconds between attempts**. No
-call is ever made with an empty id: if a lookup returns nothing, it is retried
-and then aborts with an explicit error rather than sending a malformed request.
+assignment itself retries **up to 5 times with 15 seconds between attempts**,
+and the last error line of a failed attempt is shown in the warning. No call is
+ever made with an empty id: if a lookup returns nothing, it is retried and then
+aborts with an explicit error rather than sending a malformed request.
+
+### Why a fresh install starts Disabled
+
+A Recurrence trigger fires **once, immediately**, when a workflow is created and
+again whenever it is enabled; a later redeploy or a `--report-only` update does
+not fire it. If that first run happened before the Graph app roles were assigned,
+the managed identity would obtain a token without them. Managed identity tokens
+are cached for up to ~24 hours and cannot be refreshed on demand
+([Microsoft Learn](https://learn.microsoft.com/entra/identity/managed-identities-azure-resources/managed-identity-best-practice-recommendations#limitation-of-using-managed-identities-for-authorization)),
+so the workflows would keep failing with `403` long after the roles exist.
+
+Deploying Disabled, assigning the roles, waiting, and enabling last avoids that.
+Enabling still fires one run of each workflow right away. With the default
+`ReportOnly = true` that run only reports; the scripts warn if you deploy a fresh
+install with `--report-only false`. If you pass `workflowState=Disabled` in a
+parameters file, the workflows stay Disabled. With `--skip-permissions` they stay
+Disabled too; enable them after assigning the roles with
+`./infra/deploy.sh --resource-group RG --skip-infra --enable`.
 
 ### Partial runs
 
 | Goal | Command |
 | --- | --- |
 | Everything (default) | `./infra/deploy.sh --resource-group RG --all-guests-group-id … --eligible-group-id …` |
-| Infrastructure only, grant roles later | `./infra/deploy.sh --resource-group RG … --skip-permissions` |
+| Infrastructure only, grant roles later | `./infra/deploy.sh --resource-group RG … --skip-permissions`, later `--skip-infra --enable` |
 | Re-assign Graph roles only | `./infra/deploy.sh --resource-group RG --skip-infra` |
-| Flip the dry-run switch only | `./infra/deploy.sh --resource-group RG --skip-infra --report-only false` |
+| Remove roles beyond the per-identity lists | `./infra/deploy.sh --resource-group RG --skip-infra --prune-roles` |
+| Flip the dry-run switch on one workflow | `./infra/deploy.sh --resource-group RG --skip-infra --report-only false --workflow mark` |
+| Flip the dry-run switch on both | `./infra/deploy.sh --resource-group RG --skip-infra --report-only false` |
+
+PowerShell uses the same switches: `-SkipInfra`, `-SkipPermissions`,
+`-PruneRoles`, `-Enable`, `-ReportOnly`, `-Workflow mark|delete|both`.
 
 With `--skip-infra`, the scripts discover the existing workflows in the resource
 group instead of reading deployment outputs, so no group IDs are needed.
 
 `--report-only` combined with `--skip-infra` updates **only** the `ReportOnly`
-parameter on both workflows: the script reads each workflow, replaces that one
-parameter value, and writes it back with the definition round-tripped unchanged
-and the managed identity preserved. Without `--skip-infra`, `--report-only` is
-passed to the Bicep deployment instead.
+parameter, on both workflows or on the one named by `--workflow`: the script
+reads the workflow, replaces that one parameter value, and writes it back with
+the definition round-tripped unchanged and the managed identity preserved. This
+does not fire the trigger. Without `--skip-infra`, `--report-only` is passed to
+the Bicep deployment instead and always applies to both workflows.
 
 ---
 
@@ -233,16 +270,21 @@ nothing applies:
 
 ### 3. Go live
 
-Once the report looks right:
+Once the report looks right, go live with the Mark workflow first:
 
 ```bash
-./infra/deploy.sh --resource-group rg-entraid-guest-lcm --skip-infra --report-only false
+./infra/deploy.sh --resource-group rg-entraid-guest-lcm --skip-infra --report-only false --workflow mark
 ```
 
-Stagger the two workflows: Mark runs Sunday 01:00, Delete Sunday 03:00. The gap
-lets the disable + tag propagate into the `EligibleForRemoval` dynamic group
-before the Delete workflow enumerates it. Going live on Mark first and leaving
-Delete in report-only for a full cycle is the cautious path.
+Leave Delete in report-only for a full cycle, check its report, then:
+
+```bash
+./infra/deploy.sh --resource-group rg-entraid-guest-lcm --skip-infra --report-only false --workflow delete
+```
+
+Stagger the two workflows: Mark runs Sunday 01:00 UTC, Delete Sunday 03:00 UTC
+(the triggers set no `timeZone`). The gap lets the disable + tag propagate into
+the `EligibleForRemoval` dynamic group before the Delete workflow enumerates it.
 
 ---
 
@@ -329,8 +371,11 @@ prerequisites, not to the workflows.
 
 | Symptom | Likely cause | Fix |
 | --- | --- | --- |
-| Run fails `403 Forbidden` on the first Graph call | App roles not assigned, or assigned after the run started | `./infra/deploy.sh --resource-group RG --skip-infra`, then re-trigger |
-| `Failed to assign <role>` at the end of deployment | Your account lacks Privileged Role Administrator / Global Administrator | Have an eligible admin re-run with `--skip-infra` |
+| Run fails `403 Forbidden` on the first Graph call, roles not assigned | App roles missing on that identity | `./infra/deploy.sh --resource-group RG --skip-infra`, then re-trigger |
+| Run fails `403 Forbidden`, although the roles **are** assigned, sometimes alternating with successful runs | The identity obtained a token before the roles existed, e.g. a run fired by creating or enabling the workflow. Managed identity tokens are cached for up to ~24 hours and cannot be refreshed | Wait up to 24 hours, or delete both workflows and redeploy: a fresh install creates new identities, assigns the roles and only then enables the workflows |
+| A run starts right after deploying or enabling | A Recurrence trigger fires once when a workflow is created or enabled | Expected. On a fresh install the scripts enable the workflows only after the roles are assigned |
+| `Failed to assign <role>` at the end of deployment | See the warning above it. A `403` means your account lacks Privileged Role Administrator / Global Administrator | Have an eligible admin re-run with `--skip-infra` |
+| Warning `… also holds <role>, which is not in its role list` | Installed before the per-identity role split, or a role granted by hand | `./infra/deploy.sh --resource-group RG --skip-infra --prune-roles` |
 | `Managed identity … is not visible in the directory yet` | Identity has not replicated within 5 × 15 s | Wait a few minutes, re-run with `--skip-infra` |
 | Report shows every guest as never-signed-in | `signInActivity` is absent - missing P1/P2 license or `AuditLog.Read.All` | Verify tenant licensing, then confirm the role assignment on **both** identities |
 | `totalMembersFound: 0` | Group ID wrong, group empty, or `GroupMember.Read.All` missing | Check the object ID; confirm membership in the Portal; re-run role assignment |

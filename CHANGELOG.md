@@ -13,6 +13,17 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ### Fixed
 
+- **Found in the end-to-end test against a test tenant (2026-11-23).** The v2
+  definitions as first written could not be deployed, and once deployable their
+  reports failed. None of this was caught by the static validator, which now
+  checks for all three patterns:
+  - **12 `SetVariable` actions read their own variable** (`AggregatedResponses`, `ItemErrors`, `ThrottledUnprocessed` in the read, disable and delete retry loops). Azure rejects the whole workflow at save time with "Self reference is not supported". Each value is now computed in a sibling `Compose_*` action and the variable is set from its `outputs()`; nesting depth is unchanged.
+  - **12 `Select` actions had `"from": "body('…')"` without the leading `@`**, so the input was a plain string. Rejected at save time.
+  - **`createArray()` without arguments** in 17 places, including both report actions. Accepted at save time but fails at runtime, so `Generate_JSON_Report` and `Generate_Final_Report` never produced a report. Replaced with `json('[]')`.
+  - The Mark workflow's member enumeration now guards its `foreach` with `coalesce(…, json('[]'))`, as the Delete workflow already did, so a failed page read terminates with the API error instead of an expression error.
+- **A first deployment could leave both workflows failing with `403` for up to a day.** A Recurrence trigger fires once when a workflow is created or enabled. The scripts deployed the workflows Enabled and assigned the Graph app roles afterwards, so that first run obtained a managed identity token without roles, which Azure caches for up to ~24 hours. A fresh install is now deployed Disabled, the roles are assigned, and the workflows are enabled 120 s later.
+- **`deploy.ps1` could not assign Graph app roles** under PowerShell 7.3+ on Windows: the JSON body passed as an argument to `az.cmd` lost its quotes and Graph answered `400`, reported as a missing admin role. Bodies are now always passed as files, and the last `az` error line is shown in every retry warning (both scripts).
+- **`deploy.ps1 -SkipInfra -ReportOnly` failed** under `Set-StrictMode` on `.PSObject.Properties.Count`.
 - **v1 classified every successful disable as an error, and the run then failed.**
   Microsoft Graph answers `204 No Content` for a successful `PATCH /users/{id}`,
   but the per-item success check inside the disable batch tested for status `200`.
@@ -76,6 +87,10 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ### Changed
 
+- **Graph app roles are now separate per managed identity.** Mark: `AuditLog.Read.All`, `User.Read.All`, `GroupMember.Read.All`, `User.ReadUpdate.All`, `User.EnableDisableAccount.All`. Delete: `GroupMember.Read.All`, `User.ReadWrite.All`. Previously both received `AuditLog.Read.All`, `User.ReadWrite.All` and `GroupMember.Read.All`, so the Mark identity could have deleted users despite the documentation saying otherwise. New options `--mark-roles` / `--delete-roles` and `--prune-roles` (PowerShell: `-MarkRoles`, `-DeleteRoles`, `-PruneRoles`); `--roles` still sets one list for both.
+- `--report-only` with `--skip-infra` can target one workflow with `--workflow mark|delete|both` (`-Workflow`), so the apps can go live one at a time as the docs recommend.
+- New `--enable` / `-Enable` to enable both workflows after a `--skip-permissions` install.
+- Documentation: schedules are UTC; inactivity uses the last **successful** sign-in, interactive or non-interactive; `docs/PERMISSIONS-REFERENCE.md` rewritten (it listed `User.DeleteRestore.All` for `DELETE /users`, which is not sufficient).
 - Mark workflow parameter `Threshold` renamed to `InactivityThresholdDays`.
 - `NewAccountGraceDays` is now wired into the never-signed-in condition (it was previously declared and deployed but unused).
 - `ReportOnly` now defaults to `true` in both workflow definitions.
