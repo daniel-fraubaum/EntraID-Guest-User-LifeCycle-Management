@@ -14,6 +14,13 @@ that deploy silently and then misbehave at runtime:
   * an outputs() / body() / actions() reference that reaches across a scope
     boundary. Reaching into an Until loop from outside it is accepted by Azure
     but silently reads only the final iteration.
+  * a SetVariable whose value reads the same variable. Azure rejects the
+    whole workflow at save time ("Self reference is not supported").
+    Compute the value in a Compose first and set the variable from outputs().
+  * a Select / Query "from" or a Foreach "foreach" that is a plain string
+    instead of an expression (missing leading @). Rejected at save time.
+  * createArray() called without arguments. Accepted at save time, but fails
+    at runtime as soon as the expression is evaluated. Use json('[]').
 
 Usage:
   scripts/validate-workflows.py [workflow.json ...]
@@ -189,6 +196,45 @@ def validate(path):
                 f"{MAX_EXPRESSION_CHARS}: {expression[:80]}"
             )
 
+    # --- patterns Azure rejects at save time or fails on at runtime ----------
+    for scope_name, actions in walk_scopes(root_actions):
+        for name, action in actions.items():
+            kind = action.get("type")
+            inputs = action.get("inputs") if isinstance(action.get("inputs"), dict) else {}
+
+            if kind == "SetVariable":
+                variable = inputs.get("name")
+                value = json.dumps(inputs.get("value"))
+                if variable and re.search(r"variables\(\s*'" + re.escape(variable) + r"'\s*\)", value):
+                    problems.append(
+                        f"{label}: {scope_name}/{name} sets variables('{variable}') from itself. "
+                        f"Azure rejects self reference; compute the value in a Compose "
+                        f"and set the variable from outputs()."
+                    )
+
+            if kind in ("Select", "Query"):
+                source = inputs.get("from")
+                if isinstance(source, str) and not source.startswith("@"):
+                    problems.append(
+                        f"{label}: {scope_name}/{name} 'from' is a plain string, not an "
+                        f"expression (missing leading @): {source[:80]}"
+                    )
+
+            if kind == "Foreach":
+                source = action.get("foreach")
+                if isinstance(source, str) and not source.startswith("@"):
+                    problems.append(
+                        f"{label}: {scope_name}/{name} 'foreach' is a plain string, not an "
+                        f"expression (missing leading @): {source[:80]}"
+                    )
+
+    for expression in expressions:
+        if re.search(r"\bcreateArray\(\s*\)", expression):
+            problems.append(
+                f"{label}: createArray() without arguments fails at runtime; "
+                f"use json('[]') in: {expression[:100]}"
+            )
+
     facts = {
         "actions": len(all_depths),
         "depth": deepest,
@@ -244,7 +290,8 @@ def main(argv):
         for problem in all_problems:
             print(f"  - {problem}")
         return 1
-    print("VALID: limits, scopes, parameters, variables and expressions all check out")
+    print("VALID: limits, scopes, parameters, variables, expressions and "
+          "save-time/runtime patterns all check out")
     return 0
 
 

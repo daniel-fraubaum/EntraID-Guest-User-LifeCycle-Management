@@ -421,7 +421,7 @@
           "type": "If"
         },
         "AppendMembers": {
-          "foreach": "@body('GetMembersPage')?['value']",
+          "foreach": "@coalesce(body('GetMembersPage')?['value'], json('[]'))",
           "actions": {
             "AppendSingleMember": {
               "type": "AppendToArrayVariable",
@@ -1051,7 +1051,7 @@
                     "Filter_Success_Disable": {
                       "type": "Query",
                       "inputs": {
-                        "from": "@coalesce(body('Execute_DisableBatch')?['responses'], createArray())",
+                        "from": "@coalesce(body('Execute_DisableBatch')?['responses'], json('[]'))",
                         "where": "@and(greaterOrEquals(item()?['status'], 200), less(item()?['status'], 400))"
                       },
                       "runAfter": {
@@ -1063,7 +1063,7 @@
                     "Filter_Retryable_Disable": {
                       "type": "Query",
                       "inputs": {
-                        "from": "@coalesce(body('Execute_DisableBatch')?['responses'], createArray())",
+                        "from": "@coalesce(body('Execute_DisableBatch')?['responses'], json('[]'))",
                         "where": "@or(equals(item()?['status'], 429), greaterOrEquals(item()?['status'], 500))"
                       },
                       "runAfter": {
@@ -1075,7 +1075,7 @@
                     "Filter_ClientError_Disable": {
                       "type": "Query",
                       "inputs": {
-                        "from": "@coalesce(body('Execute_DisableBatch')?['responses'], createArray())",
+                        "from": "@coalesce(body('Execute_DisableBatch')?['responses'], json('[]'))",
                         "where": "@and(and(greaterOrEquals(item()?['status'], 400), less(item()?['status'], 500)), not(equals(item()?['status'], 429)))"
                       },
                       "runAfter": {
@@ -1088,10 +1088,10 @@
                       "type": "SetVariable",
                       "inputs": {
                         "name": "AggregatedResponses",
-                        "value": "@union(variables('AggregatedResponses'), body('Filter_Success_Disable'))"
+                        "value": "@outputs('Compose_Aggregate_Success_Disable')"
                       },
                       "runAfter": {
-                        "Filter_ClientError_Disable": [
+                        "Compose_Aggregate_Success_Disable": [
                           "Succeeded"
                         ]
                       }
@@ -1099,7 +1099,7 @@
                     "Select_ClientErrors_Disable": {
                       "type": "Select",
                       "inputs": {
-                        "from": "body('Filter_ClientError_Disable')",
+                        "from": "@body('Filter_ClientError_Disable')",
                         "select": {
                           "requestId": "@item()?['id']",
                           "status": "@item()?['status']",
@@ -1119,10 +1119,10 @@
                       "type": "SetVariable",
                       "inputs": {
                         "name": "ItemErrors",
-                        "value": "@union(variables('ItemErrors'), body('Select_ClientErrors_Disable'))"
+                        "value": "@outputs('Compose_Record_ClientErrors_Disable')"
                       },
                       "runAfter": {
-                        "Select_ClientErrors_Disable": [
+                        "Compose_Record_ClientErrors_Disable": [
                           "Succeeded"
                         ]
                       }
@@ -1130,7 +1130,7 @@
                     "Select_Retry_Ids_Disable": {
                       "type": "Select",
                       "inputs": {
-                        "from": "body('Filter_Retryable_Disable')",
+                        "from": "@body('Filter_Retryable_Disable')",
                         "select": "@item()?['id']"
                       },
                       "runAfter": {
@@ -1154,7 +1154,7 @@
                     "Select_RetryAfter_Disable": {
                       "type": "Select",
                       "inputs": {
-                        "from": "body('Filter_Retryable_Disable')",
+                        "from": "@body('Filter_Retryable_Disable')",
                         "select": "@int(coalesce(item()?['headers']?['Retry-After'], item()?['headers']?['retry-after'], '0'))"
                       },
                       "runAfter": {
@@ -1346,6 +1346,24 @@
                         ]
                       },
                       "type": "If"
+                    },
+                    "Compose_Aggregate_Success_Disable": {
+                      "type": "Compose",
+                      "inputs": "@union(variables('AggregatedResponses'), body('Filter_Success_Disable'))",
+                      "runAfter": {
+                        "Filter_ClientError_Disable": [
+                          "Succeeded"
+                        ]
+                      }
+                    },
+                    "Compose_Record_ClientErrors_Disable": {
+                      "type": "Compose",
+                      "inputs": "@union(variables('ItemErrors'), body('Select_ClientErrors_Disable'))",
+                      "runAfter": {
+                        "Select_ClientErrors_Disable": [
+                          "Succeeded"
+                        ]
+                      }
                     }
                   },
                   "runAfter": {
@@ -1421,14 +1439,23 @@
                     },
                     "Record_Throttled_Disable": {
                       "runAfter": {
-                        "Select_Throttled_Disable": [
+                        "Compose_Record_Throttled_Disable": [
                           "Succeeded"
                         ]
                       },
                       "type": "SetVariable",
                       "inputs": {
                         "name": "ThrottledUnprocessed",
-                        "value": "@union(variables('ThrottledUnprocessed'), body('Select_Throttled_Disable'))"
+                        "value": "@outputs('Compose_Record_Throttled_Disable')"
+                      }
+                    },
+                    "Compose_Record_Throttled_Disable": {
+                      "type": "Compose",
+                      "inputs": "@union(variables('ThrottledUnprocessed'), body('Select_Throttled_Disable'))",
+                      "runAfter": {
+                        "Select_Throttled_Disable": [
+                          "Succeeded"
+                        ]
                       }
                     }
                   },
@@ -1521,7 +1548,7 @@
                 "Filter_Success_GetUserInfos": {
                   "type": "Query",
                   "inputs": {
-                    "from": "@coalesce(body('GetUserInfosBatch')?['responses'], createArray())",
+                    "from": "@coalesce(body('GetUserInfosBatch')?['responses'], json('[]'))",
                     "where": "@and(greaterOrEquals(item()?['status'], 200), less(item()?['status'], 400))"
                   },
                   "runAfter": {
@@ -1533,7 +1560,7 @@
                 "Filter_Retryable_GetUserInfos": {
                   "type": "Query",
                   "inputs": {
-                    "from": "@coalesce(body('GetUserInfosBatch')?['responses'], createArray())",
+                    "from": "@coalesce(body('GetUserInfosBatch')?['responses'], json('[]'))",
                     "where": "@or(equals(item()?['status'], 429), greaterOrEquals(item()?['status'], 500))"
                   },
                   "runAfter": {
@@ -1545,7 +1572,7 @@
                 "Filter_ClientError_GetUserInfos": {
                   "type": "Query",
                   "inputs": {
-                    "from": "@coalesce(body('GetUserInfosBatch')?['responses'], createArray())",
+                    "from": "@coalesce(body('GetUserInfosBatch')?['responses'], json('[]'))",
                     "where": "@and(and(greaterOrEquals(item()?['status'], 400), less(item()?['status'], 500)), not(equals(item()?['status'], 429)))"
                   },
                   "runAfter": {
@@ -1558,10 +1585,10 @@
                   "type": "SetVariable",
                   "inputs": {
                     "name": "AggregatedResponses",
-                    "value": "@union(variables('AggregatedResponses'), body('Filter_Success_GetUserInfos'))"
+                    "value": "@outputs('Compose_Aggregate_Success_GetUserInfos')"
                   },
                   "runAfter": {
-                    "Filter_ClientError_GetUserInfos": [
+                    "Compose_Aggregate_Success_GetUserInfos": [
                       "Succeeded"
                     ]
                   }
@@ -1569,7 +1596,7 @@
                 "Select_ClientErrors_GetUserInfos": {
                   "type": "Select",
                   "inputs": {
-                    "from": "body('Filter_ClientError_GetUserInfos')",
+                    "from": "@body('Filter_ClientError_GetUserInfos')",
                     "select": {
                       "requestId": "@item()?['id']",
                       "status": "@item()?['status']",
@@ -1589,10 +1616,10 @@
                   "type": "SetVariable",
                   "inputs": {
                     "name": "ItemErrors",
-                    "value": "@union(variables('ItemErrors'), body('Select_ClientErrors_GetUserInfos'))"
+                    "value": "@outputs('Compose_Record_ClientErrors_GetUserInfos')"
                   },
                   "runAfter": {
-                    "Select_ClientErrors_GetUserInfos": [
+                    "Compose_Record_ClientErrors_GetUserInfos": [
                       "Succeeded"
                     ]
                   }
@@ -1600,7 +1627,7 @@
                 "Select_Retry_Ids_GetUserInfos": {
                   "type": "Select",
                   "inputs": {
-                    "from": "body('Filter_Retryable_GetUserInfos')",
+                    "from": "@body('Filter_Retryable_GetUserInfos')",
                     "select": "@item()?['id']"
                   },
                   "runAfter": {
@@ -1624,7 +1651,7 @@
                 "Select_RetryAfter_GetUserInfos": {
                   "type": "Select",
                   "inputs": {
-                    "from": "body('Filter_Retryable_GetUserInfos')",
+                    "from": "@body('Filter_Retryable_GetUserInfos')",
                     "select": "@int(coalesce(item()?['headers']?['Retry-After'], item()?['headers']?['retry-after'], '0'))"
                   },
                   "runAfter": {
@@ -1829,6 +1856,24 @@
                     ]
                   },
                   "type": "If"
+                },
+                "Compose_Aggregate_Success_GetUserInfos": {
+                  "type": "Compose",
+                  "inputs": "@union(variables('AggregatedResponses'), body('Filter_Success_GetUserInfos'))",
+                  "runAfter": {
+                    "Filter_ClientError_GetUserInfos": [
+                      "Succeeded"
+                    ]
+                  }
+                },
+                "Compose_Record_ClientErrors_GetUserInfos": {
+                  "type": "Compose",
+                  "inputs": "@union(variables('ItemErrors'), body('Select_ClientErrors_GetUserInfos'))",
+                  "runAfter": {
+                    "Select_ClientErrors_GetUserInfos": [
+                      "Succeeded"
+                    ]
+                  }
                 }
               },
               "runAfter": {
@@ -1908,14 +1953,23 @@
                 },
                 "Record_Throttled_GetUserInfos": {
                   "runAfter": {
-                    "Select_Throttled_GetUserInfos": [
+                    "Compose_Record_Throttled_GetUserInfos": [
                       "Succeeded"
                     ]
                   },
                   "type": "SetVariable",
                   "inputs": {
                     "name": "ThrottledUnprocessed",
-                    "value": "@union(variables('ThrottledUnprocessed'), body('Select_Throttled_GetUserInfos'))"
+                    "value": "@outputs('Compose_Record_Throttled_GetUserInfos')"
+                  }
+                },
+                "Compose_Record_Throttled_GetUserInfos": {
+                  "type": "Compose",
+                  "inputs": "@union(variables('ThrottledUnprocessed'), body('Select_Throttled_GetUserInfos'))",
+                  "runAfter": {
+                    "Select_Throttled_GetUserInfos": [
+                      "Succeeded"
+                    ]
                   }
                 }
               },
@@ -2103,7 +2157,7 @@
           "throttledUnprocessedCount": "@length(variables('ThrottledUnprocessed'))",
           "errorCount": "@length(variables('ItemErrors'))",
           "excludedCount": "@length(variables('ExcludedUsers'))",
-          "warnings": "@union(if(greater(length(variables('ThrottledUnprocessed')), 0),createArray(concat(string(length(variables('ThrottledUnprocessed'))),' request(s) were still throttled after ', string(5),' attempts and were NOT processed this run. See throttledUnprocessed.')),createArray()),if(greater(length(variables('ItemErrors')), 0),createArray(concat(string(length(variables('ItemErrors'))),' request(s) failed with a non-retryable error. See errors.')),createArray()))"
+          "warnings": "@union(if(greater(length(variables('ThrottledUnprocessed')), 0),createArray(concat(string(length(variables('ThrottledUnprocessed'))),' request(s) were still throttled after ', string(5),' attempts and were NOT processed this run. See throttledUnprocessed.')),json('[]')),if(greater(length(variables('ItemErrors')), 0),createArray(concat(string(length(variables('ItemErrors'))),' request(s) failed with a non-retryable error. See errors.')),json('[]')))"
         },
         "affectedUsers": "@variables('ReportArray')",
         "configuration": {
