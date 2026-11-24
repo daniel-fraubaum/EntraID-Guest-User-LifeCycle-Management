@@ -10,7 +10,7 @@
 # itself are retried RETRY_ATTEMPTS times with RETRY_WAIT_SECONDS between tries.
 #
 # First installation order matters. A Recurrence trigger fires once as soon as
-# a workflow is created or enabled. If that first run happens before the Graph
+# a workflow is first enabled (or created Enabled). If that first run happens before the Graph
 # app roles exist, the managed identity token it obtains carries no roles, and
 # managed identity tokens are cached for up to ~24 hours - the workflows then
 # fail with 403 long after the roles were granted. So on a fresh install the
@@ -235,13 +235,28 @@ else
   existing_count="$(az resource list --resource-group "$resource_group" \
     --resource-type 'Microsoft.Logic/workflows' --query 'length(@)' -o tsv 2>/dev/null || echo 0)"
   existing_count="${existing_count//$'\r'/}"
+  file_state=''
+  if [[ -n $parameters_file ]]; then
+    file_state="$(jq -r '.parameters.workflowState.value // empty' "$parameters_file" | tr -d '\r')"
+  fi
+  state_arg=''
   if [[ ${existing_count:-0} == 0 ]]; then
     fresh_install=true
-    if [[ -n $parameters_file ]]; then
-      file_state="$(jq -r '.parameters.workflowState.value // empty' "$parameters_file")"
-      [[ -n $file_state ]] && desired_state="$file_state"
-    fi
+    [[ -n $file_state ]] && desired_state="$file_state"
+    state_arg='Disabled'
     info "Fresh install: deploying the workflows Disabled; they are enabled after the Graph app roles are assigned."
+  elif [[ -z $file_state ]]; then
+    # main.bicep defaults to Disabled (safe for a portal deployment). On a
+    # redeploy keep the state the workflows have now: Enabled if any is.
+    state_arg='Disabled'
+    while IFS= read -r existing_name; do
+      [[ -n $existing_name ]] || continue
+      existing_state="$(az resource show --resource-group "$resource_group" --name "$existing_name" \
+        --resource-type 'Microsoft.Logic/workflows' --query properties.state -o tsv </dev/null 2>/dev/null || true)"
+      [[ ${existing_state//$'\r'/} == 'Enabled' ]] && state_arg='Enabled'
+    done < <(az resource list --resource-group "$resource_group" --resource-type 'Microsoft.Logic/workflows' \
+               --query '[].name' -o tsv 2>/dev/null | tr -d '\r')
+    info "Redeploy: keeping workflow state ${state_arg}."
   fi
 
   deploy_args=(
@@ -254,7 +269,7 @@ else
   [[ -n $all_guests_group_id ]] && deploy_args+=(--parameters "allGuestsGroupId=${all_guests_group_id}")
   [[ -n $eligible_group_id ]]   && deploy_args+=(--parameters "eligibleForRemovalGroupId=${eligible_group_id}")
   [[ -n $report_only ]]         && deploy_args+=(--parameters "reportOnly=${report_only}")
-  [[ $fresh_install == true ]]  && deploy_args+=(--parameters "workflowState=Disabled")
+  [[ -n $state_arg ]]           && deploy_args+=(--parameters "workflowState=${state_arg}")
 
   log 'Deploying main.bicep'
   az deployment group create "${deploy_args[@]}" --output none
@@ -442,8 +457,9 @@ enable_workflows() {
     retry "Enabling ${workflow_name}" \
       az rest --method POST --url "https://management.azure.com${workflow_id}/enable?api-version=${WORKFLOW_API_VERSION}" >/dev/null \
       || die "Could not enable ${workflow_name}."
-    # Enabling fires the Recurrence trigger once, right away.
-    info "${workflow_name}: enabled (its Recurrence trigger runs once now)."
+    # The first enable of a workflow fires its Recurrence trigger once, right
+    # away; re-enabling one that was disabled does not.
+    info "${workflow_name}: enabled (a first enable runs the workflow once now)."
   done
 }
 

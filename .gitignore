@@ -3,9 +3,9 @@
 #   git archive --format=zip --prefix=lcm-<version>/ -o dist/lcm-<version>.zip HEAD
 dist/
 
-# Compiled Bicep output, when built locally for inspection
+# Compiled Bicep output, when built locally for inspection. infra/main.json is
+# tracked on purpose: it is the template behind the Deploy to Azure button.
 infra/*.json.out
-main.json
 
 # Python bytecode from scripts/
 __pycache__/

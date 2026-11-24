@@ -52,12 +52,17 @@ param reportOnly bool = true
 @maxValue(100)
 param batchSize int = 20
 
-@description('Whether the weekly recurrence triggers are live after deployment.')
+// Defaults to Disabled so that a deployment that does not grant the Graph app
+// roles (Azure Portal / Deploy to Azure) cannot fire a first run without them:
+// that run would cache a role-less managed identity token for up to ~24 hours.
+// deploy.sh / deploy.ps1 pass the state explicitly: Disabled on a fresh install
+// (enabled after the role assignment), the current state on a redeploy.
+@description('Whether the weekly recurrence triggers are live after deployment. Keep Disabled until the Graph app roles are assigned, then enable the workflows (deploy.sh --skip-infra --enable).')
 @allowed([
   'Enabled'
   'Disabled'
 ])
-param workflowState string = 'Enabled'
+param workflowState string = 'Disabled'
 
 @description('Tags applied to both workflows.')
 param tags object = {}

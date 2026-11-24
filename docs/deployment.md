@@ -10,6 +10,7 @@ workflows/                                  Workflow definitions - source of tru
   delete-guests-after-grace-period.json
 infra/
   main.bicep                                Both Logic Apps, definitions embedded from workflows/
+  main.json                                 main.bicep compiled to ARM, for Deploy to Azure / the Portal
   modules/logic-app-workflow.bicep          One workflow + system-assigned managed identity
   main.parameters.json                      Sample parameter file
   deploy.sh                                 Linux / macOS / Azure Cloud Shell
@@ -136,6 +137,32 @@ az account set --subscription "<subscription-id>"
 Either script prints both workflow names and both managed identity object IDs
 when it finishes.
 
+### Azure Portal (Deploy to Azure)
+
+For deployments without local tooling, the compiled template
+[`infra/main.json`](../infra/main.json) works like the v1 ARM templates did:
+
+[![Deploy to Azure](https://aka.ms/deploytoazurebutton)](https://portal.azure.com/#create/Microsoft.Template/uri/https%3A%2F%2Fraw.githubusercontent.com%2Fdaniel-fraubaum%2FEntraID-Guest-User-LifeCycle-Management%2Fmain%2Finfra%2Fmain.json)
+
+or **Deploy a custom template → Build your own template in the editor**, paste
+the file, fill in the group object IDs and deploy. Both workflows are created in
+one deployment, each with its system-assigned managed identity, and **Disabled**:
+`workflowState` defaults to `Disabled` because a template cannot grant Graph app
+roles, and a run before the roles exist would cache a role-less token (see
+[Why a fresh install starts Disabled](#why-a-fresh-install-starts-disabled)).
+
+Then grant the roles and enable the workflows, from any shell with `az` and `jq`,
+for example Azure Cloud Shell after cloning the repository:
+
+```bash
+./infra/deploy.sh --resource-group rg-entraid-guest-lcm --skip-infra --enable
+```
+
+`infra/main.json` is generated from `main.bicep`; do not edit it by hand. After
+changing a workflow or the Bicep, rebuild it with
+`az bicep build --file infra/main.bicep --outfile infra/main.json`;
+`scripts/validate-workflows.py` fails while it is out of date.
+
 ### What the scripts do
 
 1. Create the resource group if it does not exist.
@@ -152,16 +179,17 @@ aborts with an explicit error rather than sending a malformed request.
 
 ### Why a fresh install starts Disabled
 
-A Recurrence trigger fires **once, immediately**, when a workflow is created and
-again whenever it is enabled; a later redeploy or a `--report-only` update does
-not fire it. If that first run happened before the Graph app roles were assigned,
+A Recurrence trigger fires **once, immediately**, when a workflow is enabled for
+the first time, or created Enabled. Re-enabling a workflow that was disabled, a
+later redeploy and a `--report-only` update do not fire it (all verified in a
+test tenant). If that first run happened before the Graph app roles were assigned,
 the managed identity would obtain a token without them. Managed identity tokens
 are cached for up to ~24 hours and cannot be refreshed on demand
 ([Microsoft Learn](https://learn.microsoft.com/entra/identity/managed-identities-azure-resources/managed-identity-best-practice-recommendations#limitation-of-using-managed-identities-for-authorization)),
 so the workflows would keep failing with `403` long after the roles exist.
 
 Deploying Disabled, assigning the roles, waiting, and enabling last avoids that.
-Enabling still fires one run of each workflow right away. With the default
+The first enable still fires one run of each workflow right away. With the default
 `ReportOnly = true` that run only reports; the scripts warn if you deploy a fresh
 install with `--report-only false`. If you pass `workflowState=Disabled` in a
 parameters file, the workflows stay Disabled. With `--skip-permissions` they stay
@@ -304,7 +332,7 @@ Set on `infra/main.bicep`; each is passed through to the corresponding workflow 
 | `newAccountGraceDays` | `NewAccountGraceDays` | `30` | Mark | Minimum account age before a never-signed-in guest may be marked. **Additional** to `inactivityThresholdDays`, not a replacement |
 | `reportOnly` | `ReportOnly` | `true` | Both | Dry run. Nothing is disabled or deleted while true |
 | `batchSize` | `BatchSize` | `20` | Both | Users per Graph `$batch` request (1-100) |
-| `workflowState` | - | `Enabled` | Both | `Disabled` deploys the workflows without arming the schedule |
+| `workflowState` | - | `Disabled` | Both | Whether the weekly schedule is armed. Disabled by default for portal deployments; the scripts pass `Disabled` on a fresh install (then enable after the roles) and the current state on a redeploy. A value in `--parameters-file` wins |
 
 Every declared workflow parameter is now read by the definitions - there are no
 inert parameters. Two notes on semantics:
@@ -376,7 +404,7 @@ prerequisites, not to the workflows.
 | --- | --- | --- |
 | Run fails `403 Forbidden` on the first Graph call, roles not assigned | App roles missing on that identity | `./infra/deploy.sh --resource-group RG --skip-infra`, then re-trigger |
 | Run fails `403 Forbidden`, although the roles **are** assigned, sometimes alternating with successful runs | The identity obtained a token before the roles existed, e.g. a run fired by creating or enabling the workflow. Managed identity tokens are cached for up to ~24 hours and cannot be refreshed | Wait up to 24 hours, or delete both workflows and redeploy: a fresh install creates new identities, assigns the roles and only then enables the workflows |
-| A run starts right after deploying or enabling | A Recurrence trigger fires once when a workflow is created or enabled | Expected. On a fresh install the scripts enable the workflows only after the roles are assigned |
+| A run starts right after the first deployment or enable | A Recurrence trigger fires once when a workflow is enabled for the first time (or created Enabled) | Expected. On a fresh install the scripts enable the workflows only after the roles are assigned |
 | `Failed to assign <role>` at the end of deployment | See the warning above it. A `403` means your account lacks Privileged Role Administrator / Global Administrator | Have an eligible admin re-run with `--skip-infra` |
 | Warning `… also holds <role>, which is not in its role list` | Installed before the per-identity role split, or a role granted by hand | `./infra/deploy.sh --resource-group RG --skip-infra --prune-roles` |
 | `Managed identity … is not visible in the directory yet` | Identity has not replicated within 5 × 15 s | Wait a few minutes, re-run with `--skip-infra` |

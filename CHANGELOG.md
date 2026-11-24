@@ -4,12 +4,13 @@ All notable changes to this project will be documented in this file.
 
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
-## [2.0.0] - Unreleased
+## [2.0.0] - 2026-11-24
 
-> Awaiting live validation against a test tenant. Do not tag or publish a release
-> from this section until a `ReportOnly = true` run of both Logic Apps has been
-> reviewed. See [docs/migration-v1-to-v2.md](docs/migration-v1-to-v2.md) if you are
-> upgrading from v1.
+Validated end to end against a test tenant on 2026-11-23/24: fresh install with
+both deploy scripts, idempotent redeploys, role pruning, per-workflow
+`ReportOnly` switching, report-only and live runs of both Logic Apps. See
+[docs/migration-v1-to-v2.md](docs/migration-v1-to-v2.md) if you are upgrading
+from v1.
 
 ### Fixed
 
@@ -22,7 +23,7 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
   - **`createArray()` without arguments** in 17 places, including both report actions. Accepted at save time but fails at runtime, so `Generate_JSON_Report` and `Generate_Final_Report` never produced a report. Replaced with `json('[]')`.
   - The Mark workflow's member enumeration now guards its `foreach` with `coalesce(…, json('[]'))`, as the Delete workflow already did, so a failed page read terminates with the API error instead of an expression error.
 - **A failed disable or delete was reported as a success.** `affectedUsers[].actionTaken` (Mark) and `deletedUsers[].actionTaken` (Delete) were set to `DISABLED` / `DELETED` when the request was queued, so a guest whose `PATCH` or `DELETE` returned `403` still appeared as done; only `errors[]` told the truth. Three root-level `Select` actions now reconcile each entry with `errors[]` and `throttledUnprocessed[]` before the report is written, giving `DISABLE FAILED` / `DISABLE THROTTLED` and `DELETE FAILED` / `DELETE THROTTLED`. Nesting depth is unchanged.
-- **A first deployment could leave both workflows failing with `403` for up to a day.** A Recurrence trigger fires once when a workflow is created or enabled. The scripts deployed the workflows Enabled and assigned the Graph app roles afterwards, so that first run obtained a managed identity token without roles, which Azure caches for up to ~24 hours. A fresh install is now deployed Disabled, the roles are assigned, and the workflows are enabled 120 s later.
+- **A first deployment could leave both workflows failing with `403` for up to a day.** A Recurrence trigger fires once when a workflow is created Enabled or enabled for the first time. The scripts deployed the workflows Enabled and assigned the Graph app roles afterwards, so that first run obtained a managed identity token without roles, which Azure caches for up to ~24 hours. A fresh install is now deployed Disabled, the roles are assigned, and the workflows are enabled 120 s later.
 - **`deploy.ps1` could not assign Graph app roles** under PowerShell 7.3+ on Windows: the JSON body passed as an argument to `az.cmd` lost its quotes and Graph answered `400`, reported as a missing admin role. Bodies are now always passed as files, and the last `az` error line is shown in every retry warning (both scripts).
 - **`deploy.ps1 -SkipInfra -ReportOnly` failed** under `Set-StrictMode` on `.PSObject.Properties.Count`.
 - **v1 classified every successful disable as an error, and the run then failed.**
@@ -70,6 +71,7 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ### Added
 
+- **Deploy to Azure / Portal deployment**, the v1 "Deploy a custom template" path: `infra/main.json` is `main.bicep` compiled to ARM and tracked in the repo, with a Deploy to Azure button in the README. It deploys both workflows Disabled; `deploy.sh --skip-infra --enable` then grants the Graph roles and enables them. `scripts/validate-workflows.py` fails when `infra/main.json` no longer embeds the current workflow definitions.
 - **Exclusion guard in the Mark workflow.** A guest whose `extensionAttribute15` equals `ExcludeFromLCM` (compared case-insensitively) is never marked and never disabled, regardless of group membership, and is counted in a new `excluded` report section. This closes the documented hazard where a guest still present in the source group during dynamic-membership re-evaluation lag had its exclusion flag permanently overwritten by the mark timestamp.
 - `docs/migration-v1-to-v2.md` - upgrade notes for existing v1 installations, including the defect above and what redeploying preserves.
 - `docs/deployment.md` and README: full extension attribute contract, consolidated parameter table with defaults, deploy quickstart, ReportOnly-first walkthrough, and a "Works together with VouchGate" section.
@@ -88,6 +90,7 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ### Changed
 
+- **`workflowState` defaults to `Disabled`** in `main.bicep`, so a template deployment without the role assignment cannot fire a role-less first run. The deploy scripts pass the state explicitly: `Disabled` on a fresh install followed by an enable once the roles exist, and on a redeploy the state the workflows already have. A `workflowState` in `--parameters-file` still wins.
 - **Graph app roles are listed per managed identity.** Mark: `AuditLog.Read.All`, `GroupMember.Read.All`, `User.ReadWrite.All`. Delete: `GroupMember.Read.All`, `User.ReadWrite.All` (no longer `AuditLog.Read.All`). New options `--mark-roles` / `--delete-roles` and `--prune-roles` (PowerShell: `-MarkRoles`, `-DeleteRoles`, `-PruneRoles`); `--roles` still sets one list for both.
 - **Documentation no longer claims the Mark identity cannot delete.** A narrower Mark set (`User.ReadUpdate.All` + `User.EnableDisableAccount.All`) was tested live: `accountEnabled` works, but `PATCH` of `onPremisesExtensionAttributes` returns `403`. The only alternative, `Directory.ReadWrite.All`, is broader. Mark therefore needs `User.ReadWrite.All`, which also allows `DELETE /users`; the separation is a property of the workflow definition, and write access to the Logic Apps must be restricted accordingly.
 - `--report-only` with `--skip-infra` can target one workflow with `--workflow mark|delete|both` (`-Workflow`), so the apps can go live one at a time as the docs recommend.

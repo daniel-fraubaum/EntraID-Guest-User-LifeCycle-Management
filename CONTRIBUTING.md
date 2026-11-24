@@ -182,7 +182,11 @@ Before submitting a PR, verify your changes:
 1. **Validate the workflow definitions**: `python3 scripts/validate-workflows.py`.
    This is fast, needs no Azure access, and catches the limits and scope mistakes
    described above.
-2. **Compile the infrastructure**: `az bicep build --file infra/main.bicep`.
+2. **Compile the infrastructure into the tracked ARM template**:
+   `az bicep build --file infra/main.bicep --outfile infra/main.json`, and commit
+   `infra/main.json` with your change. It is what the Deploy to Azure button
+   deploys; the validator fails while it does not embed the current workflows.
+   Run the validator again after rebuilding.
 3. **Deploy both Logic Apps** to a test Azure subscription: `./infra/deploy.sh --resource-group <test-rg> ...`.
 4. **Run in `ReportOnly = true` mode** first and verify the JSON output, including that `throttledUnprocessed[]`, `errors[]` and `excluded[]` are as expected.
 5. **Run in `ReportOnly = false` mode** in a non-production tenant with test guest users.

@@ -21,11 +21,16 @@ that deploy silently and then misbehave at runtime:
     instead of an expression (missing leading @). Rejected at save time.
   * createArray() called without arguments. Accepted at save time, but fails
     at runtime as soon as the expression is evaluated. Use json('[]').
+  * infra/main.json out of date. It is the compiled template behind the
+    Deploy to Azure button and must embed exactly the definitions in
+    workflows/. Rebuild with:
+      az bicep build --file infra/main.bicep --outfile infra/main.json
 
 Usage:
   scripts/validate-workflows.py [workflow.json ...]
 
-With no arguments, validates every *.json in workflows/.
+With no arguments, validates every *.json in workflows/ and checks that
+infra/main.json embeds them unchanged.
 Exit codes: 0 valid, 1 problems found, 2 usage error.
 """
 
@@ -246,11 +251,31 @@ def validate(path):
     return problems, facts, notes
 
 
+def check_compiled_template(root, paths):
+    """infra/main.json must embed every workflow definition unchanged."""
+    rebuild = "az bicep build --file infra/main.bicep --outfile infra/main.json"
+    template_path = root / "infra" / "main.json"
+    if not template_path.is_file():
+        return [f"infra/main.json is missing. Build it with: {rebuild}"]
+    template = json.loads(template_path.read_text(encoding="utf-8"))
+    # Bicep's loadJsonContent() lands as template variables.
+    embedded = [value for value in template.get("variables", {}).values() if isinstance(value, dict)]
+    problems = []
+    for path in paths:
+        definition = json.loads(path.read_text(encoding="utf-8"))
+        if not any(value == definition for value in embedded):
+            problems.append(
+                f"infra/main.json does not embed the current {path.name}. Rebuild it with: {rebuild}"
+            )
+    return problems
+
+
 def main(argv):
     if argv and argv[0] in ("-h", "--help"):
         print(__doc__)
         return 0
 
+    root = None
     if argv:
         paths = [pathlib.Path(a) for a in argv]
     else:
@@ -278,6 +303,12 @@ def main(argv):
         print(f"  parameters   : {', '.join(facts['parameters'])}")
         print(f"  variables    : {len(facts['variables'])}")
         print(f"  expressions  : {facts['expressions']}")
+
+    if root is not None:
+        all_problems.extend(check_compiled_template(root, paths))
+        print("infra/main.json")
+        print("  embeds the workflow definitions: "
+              f"{'no' if any('infra/main.json' in p for p in all_problems) else 'yes'}")
 
     if all_notes:
         print("\nnotes (legal, but worth knowing):")

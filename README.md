@@ -27,6 +27,7 @@ workflows/                                 Workflow definitions - source of trut
   delete-guests-after-grace-period.json
 infra/
   main.bicep                               Both Logic Apps, definitions embedded from workflows/
+  main.json                                main.bicep compiled to ARM, for Deploy to Azure / the Portal
   modules/logic-app-workflow.bicep         One workflow + system-assigned managed identity
   main.parameters.json                     Sample parameter file
   deploy.sh / deploy.ps1                   Deploy + grant Graph app roles, idempotent
@@ -311,6 +312,22 @@ az account set --subscription "<subscription-id>"
   -EligibleGroupId  "<objectId of GRP_SEC_GuestUserLCM_EligibleForRemoval>"
 ```
 
+**Azure Portal, no local tooling**
+
+[![Deploy to Azure](https://aka.ms/deploytoazurebutton)](https://portal.azure.com/#create/Microsoft.Template/uri/https%3A%2F%2Fraw.githubusercontent.com%2Fdaniel-fraubaum%2FEntraID-Guest-User-LifeCycle-Management%2Fmain%2Finfra%2Fmain.json)
+
+The button deploys [`infra/main.json`](infra/main.json) (or paste that file into
+*Deploy a custom template → Build your own template in the editor*). Fill in the
+two group object IDs. A template cannot grant Graph app roles, so the workflows
+arrive **Disabled** (`workflowState` defaults to `Disabled`): enabled before the
+roles exist, their first run would cache a managed identity token without roles
+for up to ~24 hours. Then assign the roles and enable both, for example from
+Azure Cloud Shell:
+
+```bash
+./infra/deploy.sh --resource-group rg-entraid-guest-lcm --skip-infra --enable
+```
+
 Useful partial runs:
 
 | Goal | Command |
@@ -323,7 +340,7 @@ Useful partial runs:
 
 On a **fresh install** the scripts deploy both workflows Disabled, assign the
 Graph app roles, wait two minutes and only then enable them. A Recurrence trigger
-fires once the moment a workflow is created or enabled; if that run happens
+fires once the moment a workflow is first enabled (or created Enabled); if that run happens
 before the roles exist, the managed identity caches a token without them for up
 to ~24 hours and every run fails with `403`. Enabling therefore starts one
 report-only run of each app right away, which is expected.
@@ -391,7 +408,7 @@ parameter. Defaults are safe: report-only, weekly, conservative thresholds.
 | `location` | n/a | resource group location | Both | Azure region |
 | `markWorkflowName` | n/a | `Logic-EntraIDGuestLCM-MarkGuestsEligibleforRemoval` | Mark | Logic App resource name |
 | `deleteWorkflowName` | n/a | `Logic-EntraIDGuestLCM-DeleteGuestUsersAfterGracePeriod` | Delete | Logic App resource name |
-| `workflowState` | n/a | `Enabled` | Both | `Disabled` deploys without arming the weekly schedule |
+| `workflowState` | n/a | `Disabled` | Both | Whether the weekly schedule is armed. Disabled by default so a portal deployment cannot run before the Graph roles exist. The deploy scripts set it: `Disabled` then enable on a fresh install, the current state on a redeploy |
 | `tags` | n/a | `{}` | Both | Tags applied to both Logic Apps |
 
 Two notes on semantics:
