@@ -113,7 +113,7 @@ Managed identity tokens are cached by Azure for up to ~24 hours and cannot be
 refreshed on demand. A token obtained **before** a role was assigned keeps failing
 with `403`; a role **removed** with `--prune-roles` may keep working until the
 cached token expires. Because a Recurrence trigger fires once when a workflow is
-created or enabled, the scripts deploy a fresh install Disabled and enable it
+first enabled (or created Enabled), the scripts deploy a fresh install Disabled and enable it
 only after the role assignment. See
 [Limitation of using managed identities for authorization](https://learn.microsoft.com/entra/identity/managed-identities-azure-resources/managed-identity-best-practice-recommendations#limitation-of-using-managed-identities-for-authorization).
 

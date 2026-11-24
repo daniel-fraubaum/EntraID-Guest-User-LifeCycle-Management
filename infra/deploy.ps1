@@ -12,7 +12,7 @@
     itself is retried $RetryAttempts times with $RetryWaitSeconds between tries.
 
     First installation order matters. A Recurrence trigger fires once as soon as
-    a workflow is created or enabled. If that first run happens before the Graph
+    a workflow is first enabled (or created Enabled). If that first run happens before the Graph
     app roles exist, the managed identity token it obtains carries no roles, and
     managed identity tokens are cached for up to ~24 hours - the workflows then
     fail with 403 long after the roles were granted. So on a fresh install the
@@ -218,17 +218,35 @@ else {
         -AzArgs @('resource', 'list', '--resource-group', $ResourceGroup,
                   '--resource-type', 'Microsoft.Logic/workflows', '--query', '[].name', '-o', 'json')
     if ($null -eq $existingJson) { Stop-WithError "Could not list the Logic Apps in $ResourceGroup." }
-    $existingCount = if ($existingJson) { @($existingJson | ConvertFrom-Json).Count } else { 0 }
-    if ($existingCount -eq 0) {
-        $FreshInstall = $true
-        if ($ParametersFile) {
-            $file = Get-Content $ParametersFile -Raw | ConvertFrom-Json
-            $fileParameters = if ($file.PSObject.Properties.Name -contains 'parameters') { $file.parameters } else { $null }
-            if ($fileParameters -and $fileParameters.PSObject.Properties.Name -contains 'workflowState') {
-                $DesiredState = [string] $fileParameters.workflowState.value
-            }
+    $existingNames = if ($existingJson) { @($existingJson | ConvertFrom-Json) } else { @() }
+
+    $fileState = $null
+    if ($ParametersFile) {
+        $file = Get-Content $ParametersFile -Raw | ConvertFrom-Json
+        $fileParameters = if ($file.PSObject.Properties.Name -contains 'parameters') { $file.parameters } else { $null }
+        if ($fileParameters -and $fileParameters.PSObject.Properties.Name -contains 'workflowState') {
+            $fileState = [string] $fileParameters.workflowState.value
         }
+    }
+
+    $stateArg = $null
+    if ($existingNames.Count -eq 0) {
+        $FreshInstall = $true
+        if ($fileState) { $DesiredState = $fileState }
+        $stateArg = 'Disabled'
         Write-Info 'Fresh install: deploying the workflows Disabled; they are enabled after the Graph app roles are assigned.'
+    }
+    elseif (-not $fileState) {
+        # main.bicep defaults to Disabled (safe for a portal deployment). On a
+        # redeploy keep the state the workflows have now: Enabled if any is.
+        $stateArg = 'Disabled'
+        foreach ($existingName in $existingNames) {
+            $existingState = Invoke-WithRetry -Description "Reading state of $existingName" -RequireOutput `
+                -AzArgs @('resource', 'show', '--resource-group', $ResourceGroup, '--name', $existingName,
+                          '--resource-type', 'Microsoft.Logic/workflows', '--query', 'properties.state', '-o', 'tsv')
+            if ($existingState -eq 'Enabled') { $stateArg = 'Enabled' }
+        }
+        Write-Info "Redeploy: keeping workflow state $stateArg."
     }
 
     $deployArgs = @(
@@ -242,7 +260,7 @@ else {
     if ($AllGuestsGroupId) { $deployArgs += @('--parameters', "allGuestsGroupId=$AllGuestsGroupId") }
     if ($EligibleGroupId)  { $deployArgs += @('--parameters', "eligibleForRemovalGroupId=$EligibleGroupId") }
     if ($ReportOnly)       { $deployArgs += @('--parameters', "reportOnly=$ReportOnly") }
-    if ($FreshInstall)     { $deployArgs += @('--parameters', 'workflowState=Disabled') }
+    if ($stateArg)         { $deployArgs += @('--parameters', "workflowState=$stateArg") }
 
     Write-Section 'Deploying main.bicep'
     az @deployArgs --output none
@@ -468,8 +486,9 @@ function Enable-Workflows {
             -AzArgs @('rest', '--method', 'POST',
                       '--url', "https://management.azure.com$workflowId/enable?api-version=$WorkflowApiVersion")
         if ($null -eq $enabled) { Stop-WithError "Could not enable $name." }
-        # Enabling fires the Recurrence trigger once, right away.
-        Write-Info "${name}: enabled (its Recurrence trigger runs once now)."
+        # The first enable of a workflow fires its Recurrence trigger once, right
+        # away; re-enabling one that was disabled does not.
+        Write-Info "${name}: enabled (a first enable runs the workflow once now)."
     }
 }
 
