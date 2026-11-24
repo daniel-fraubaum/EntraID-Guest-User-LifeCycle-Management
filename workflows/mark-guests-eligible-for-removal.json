@@ -2123,9 +2123,8 @@
     },
     "Generate_JSON_Report": {
       "runAfter": {
-        "Check_If_DisableBatch_Error_Occurred": [
-          "Succeeded",
-          "Skipped"
+        "Finalize_Affected_Users": [
+          "Succeeded"
         ]
       },
       "type": "Compose",
@@ -2159,7 +2158,7 @@
           "excludedCount": "@length(variables('ExcludedUsers'))",
           "warnings": "@union(if(greater(length(variables('ThrottledUnprocessed')), 0),createArray(concat(string(length(variables('ThrottledUnprocessed'))),' request(s) were still throttled after ', string(5),' attempts and were NOT processed this run. See throttledUnprocessed.')),json('[]')),if(greater(length(variables('ItemErrors')), 0),createArray(concat(string(length(variables('ItemErrors'))),' request(s) failed with a non-retryable error. See errors.')),json('[]')))"
         },
-        "affectedUsers": "@variables('ReportArray')",
+        "affectedUsers": "@body('Finalize_Affected_Users')",
         "configuration": {
           "audience": "https://graph.microsoft.com",
           "reportOnly": "@parameters('ReportOnly')",
@@ -2321,6 +2320,43 @@
       },
       "runAfter": {
         "Initialize_ItemErrors": [
+          "Succeeded"
+        ]
+      }
+    },
+    "Select_Disable_Error_Ids": {
+      "type": "Select",
+      "inputs": {
+        "from": "@variables('ItemErrors')",
+        "select": "@if(equals(item()?['phase'], 'disable-guest'), replace(string(item()?['requestId']), 'disable-', ''), '')"
+      },
+      "runAfter": {
+        "Check_If_DisableBatch_Error_Occurred": [
+          "Succeeded",
+          "Skipped"
+        ]
+      }
+    },
+    "Select_Disable_Throttled_Ids": {
+      "type": "Select",
+      "inputs": {
+        "from": "@variables('ThrottledUnprocessed')",
+        "select": "@if(equals(item()?['phase'], 'disable-guest'), replace(string(item()?['requestId']), 'disable-', ''), '')"
+      },
+      "runAfter": {
+        "Select_Disable_Error_Ids": [
+          "Succeeded"
+        ]
+      }
+    },
+    "Finalize_Affected_Users": {
+      "type": "Select",
+      "inputs": {
+        "from": "@variables('ReportArray')",
+        "select": "@setProperty(item(), 'actionTaken', if(contains(body('Select_Disable_Error_Ids'), item()?['userId']), 'DISABLE FAILED', if(contains(body('Select_Disable_Throttled_Ids'), item()?['userId']), 'DISABLE THROTTLED', item()?['actionTaken'])))"
+      },
+      "runAfter": {
+        "Select_Disable_Throttled_Ids": [
           "Succeeded"
         ]
       }

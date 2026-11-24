@@ -1606,11 +1606,8 @@
     },
     "Generate_Final_Report": {
       "runAfter": {
-        "Check_If_Failed_Deletes_Exist": [
-          "Succeeded",
-          "Skipped",
-          "Failed",
-          "TimedOut"
+        "Finalize_Deleted_Users": [
+          "Succeeded"
         ]
       },
       "type": "Compose",
@@ -1641,7 +1638,7 @@
           "errorCount": "@length(variables('ItemErrors'))",
           "warnings": "@union(if(greater(length(variables('ThrottledUnprocessed')), 0),createArray(concat(string(length(variables('ThrottledUnprocessed'))),' request(s) were still throttled after ', string(5),' attempts and were NOT processed this run. See throttledUnprocessed.')),json('[]')),if(greater(length(variables('ItemErrors')), 0),createArray(concat(string(length(variables('ItemErrors'))),' request(s) failed with a non-retryable error. See errors.')),json('[]')))"
         },
-        "deletedUsers": "@variables('DeletedUsersReport')",
+        "deletedUsers": "@body('Finalize_Deleted_Users')",
         "failedDeletes": "@variables('FailedDeletes')",
         "configuration": {
           "audience": "https://graph.microsoft.com",
@@ -1769,6 +1766,45 @@
       },
       "runAfter": {
         "Initialize_ThrottledUnprocessed": [
+          "Succeeded"
+        ]
+      }
+    },
+    "Select_Delete_Error_Ids": {
+      "type": "Select",
+      "inputs": {
+        "from": "@variables('ItemErrors')",
+        "select": "@if(equals(item()?['phase'], 'delete-guest'), replace(string(item()?['requestId']), 'delete-', ''), '')"
+      },
+      "runAfter": {
+        "Check_If_Failed_Deletes_Exist": [
+          "Succeeded",
+          "Skipped",
+          "Failed",
+          "TimedOut"
+        ]
+      }
+    },
+    "Select_Delete_Throttled_Ids": {
+      "type": "Select",
+      "inputs": {
+        "from": "@variables('ThrottledUnprocessed')",
+        "select": "@if(equals(item()?['phase'], 'delete-guest'), replace(string(item()?['requestId']), 'delete-', ''), '')"
+      },
+      "runAfter": {
+        "Select_Delete_Error_Ids": [
+          "Succeeded"
+        ]
+      }
+    },
+    "Finalize_Deleted_Users": {
+      "type": "Select",
+      "inputs": {
+        "from": "@variables('DeletedUsersReport')",
+        "select": "@setProperty(item(), 'actionTaken', if(contains(body('Select_Delete_Error_Ids'), item()?['userId']), 'DELETE FAILED', if(contains(body('Select_Delete_Throttled_Ids'), item()?['userId']), 'DELETE THROTTLED', item()?['actionTaken'])))"
+      },
+      "runAfter": {
+        "Select_Delete_Throttled_Ids": [
           "Succeeded"
         ]
       }
