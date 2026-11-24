@@ -1,12 +1,10 @@
 #!/usr/bin/env python3
 """Query the Microsoft Learn MCP server from the command line.
 
-The Microsoft Learn MCP server (https://learn.microsoft.com/api/mcp) is
-registered for this repo in .mcp.json, but Claude Code only exposes it as
-native mcp__microsoft-learn__* tools after the interactive folder-trust
-prompt has been accepted. This script talks the MCP streamable-HTTP protocol
-directly so official Microsoft Graph / Entra ID / Azure documentation stays
-reachable without that prompt, and without any editor in the loop.
+The Microsoft Learn MCP server (https://learn.microsoft.com/api/mcp) serves
+official Microsoft Graph / Entra ID / Azure documentation. This script talks
+the MCP streamable-HTTP protocol directly, so that documentation is reachable
+from any shell, without an MCP client or editor in the loop.
 
 The endpoint is unauthenticated: no OAuth, no API key, no token.
 
