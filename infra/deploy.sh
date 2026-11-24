@@ -29,17 +29,20 @@ readonly RETRY_WAIT_SECONDS=15
 # the workflow requests already carries the roles.
 readonly ENABLE_DELAY_SECONDS=120
 
-# Least-privilege Graph app roles, per managed identity.
+# Graph app roles, per managed identity.
 #
-# Mark reads signInActivity (AuditLog.Read.All + User.Read.All), enumerates the
-# source group (GroupMember.Read.All), writes extensionAttribute14/15
-# (User.ReadUpdate.All) and sets accountEnabled = false
-# (User.EnableDisableAccount.All). None of these allows DELETE /users.
+# Mark reads signInActivity (AuditLog.Read.All), enumerates the source group
+# (GroupMember.Read.All), and writes extensionAttribute14/15 plus
+# accountEnabled (User.ReadWrite.All). Writing onPremisesExtensionAttributes is
+# rejected with 403 under User.ReadUpdate.All (verified live), and the only
+# other option, Directory.ReadWrite.All, is broader. User.ReadWrite.All also
+# allows DELETE /users, so "Mark never deletes" rests on the workflow
+# definition: restrict who can edit the Logic App.
 #
 # Delete enumerates the source group (GroupMember.Read.All) and deletes users,
 # for which User.ReadWrite.All is the only application permission. It never
 # reads signInActivity, so it does not get AuditLog.Read.All.
-DEFAULT_MARK_ROLES='AuditLog.Read.All GroupMember.Read.All User.Read.All User.ReadUpdate.All User.EnableDisableAccount.All'
+DEFAULT_MARK_ROLES='AuditLog.Read.All GroupMember.Read.All User.ReadWrite.All'
 DEFAULT_DELETE_ROLES='GroupMember.Read.All User.ReadWrite.All'
 
 resource_group=''
@@ -82,13 +85,12 @@ Options:
   --workflow mark|delete|both  Which workflow --skip-infra --report-only updates
                                (default: both). Use it to go live one app at a time.
   --mark-roles "A B C"         Graph app roles for the Mark identity (default:
-                               AuditLog.Read.All GroupMember.Read.All User.Read.All
-                               User.ReadUpdate.All User.EnableDisableAccount.All).
+                               AuditLog.Read.All GroupMember.Read.All User.ReadWrite.All).
   --delete-roles "A B"         Graph app roles for the Delete identity (default:
                                GroupMember.Read.All User.ReadWrite.All).
   --roles "A B C"              Same role list for both identities (overrides the two above).
   --prune-roles                Remove Graph app roles an identity holds beyond its
-                               list (e.g. User.ReadWrite.All on Mark after a v2.0 install).
+                               list (e.g. AuditLog.Read.All on Delete after a v2.0 install).
   --enable                     Enable both workflows after the role assignment.
                                Done automatically on a fresh install.
   --skip-infra                 Do not create the RG or deploy Bicep.
@@ -361,7 +363,7 @@ assign_roles_to() {
     fi
   done
 
-  # Roles held beyond the list, e.g. User.ReadWrite.All on Mark from v2.0.
+  # Roles held beyond the list, e.g. AuditLog.Read.All on Delete from v2.0.
   while IFS=$'\t' read -r assignment_id assigned_role_id; do
     [[ -n $assignment_id ]] || continue
     [[ " ${wanted_ids} " == *" ${assigned_role_id} "* ]] && continue
@@ -376,7 +378,8 @@ assign_roles_to() {
     else
       warn "${label} identity also holds ${assigned_name}, which is not in its role list. Re-run with --prune-roles to remove it."
     fi
-  done < <(jq -r '.[] | [.id, .appRoleId] | @tsv' <<<"$existing")
+  # tr: jq on Windows ends lines with CRLF, and read would keep the \r.
+  done < <(jq -r '.[] | [.id, .appRoleId] | @tsv' <<<"$existing" | tr -d '\r')
 }
 
 assign_graph_roles() {

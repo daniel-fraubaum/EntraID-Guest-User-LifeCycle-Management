@@ -44,9 +44,10 @@ Two independent Consumption Logic Apps, each with its own system-assigned manage
 identity, each fed by its own dynamic security group. They are deliberately
 separate: the Mark app can disable but never delete, the Delete app deletes but
 never marks, and the handoff between them is a pair of extension attributes on
-the user object rather than shared state. The separation is enforced by the Graph
-app roles, not only by the workflow logic: the Mark identity holds no permission
-that allows `DELETE /users` (see [Permissions](#-permissions-per-managed-identity)).
+the user object rather than shared state. That separation lives in the workflow
+definitions: the Mark identity needs `User.ReadWrite.All` to write the extension
+attributes, and that role would also allow `DELETE /users`. Restrict who can
+edit the Logic Apps (see [Permissions](#-permissions-per-managed-identity)).
 
 ```
                  Entra ID tenant
@@ -191,27 +192,34 @@ Running LCM without VouchGate is fine: leave `extensionAttribute13` unset and th
 
 ### 🔐 Permissions per managed identity
 
-Each identity gets only what its own job needs. Microsoft Graph has no
-application permission that allows `DELETE /users` other than
-`User.ReadWrite.All`, so keeping that role off the Mark identity is what makes
-"Mark never deletes" a property of the permissions rather than of the workflow.
+Each identity gets only what its own job needs:
 
 | App role | Mark | Delete | Why |
 | --- | :---: | :---: | --- |
 | `AuditLog.Read.All` | ✅ | | Gates `signInActivity`; without it Graph omits the property |
-| `User.Read.All` | ✅ | | Read users, together with `AuditLog.Read.All` for `signInActivity` |
 | `GroupMember.Read.All` | ✅ | ✅ | Enumerate `/groups/{id}/members` |
-| `User.ReadUpdate.All` | ✅ | | `PATCH /users/{id}` for `extensionAttribute14` / `15`; does not allow delete |
-| `User.EnableDisableAccount.All` | ✅ | | Set `accountEnabled = false` |
-| `User.ReadWrite.All` | | ✅ | `DELETE /users/{id}`; the only application permission that allows it |
+| `User.ReadWrite.All` | ✅ | ✅ | Mark: `PATCH /users/{id}` for `accountEnabled` and `extensionAttribute14` / `15`. Delete: read the attributes and `DELETE /users/{id}` |
+
+**Mark could technically delete.** A narrower split was tested against a live
+tenant and does not work: `User.ReadUpdate.All` plus
+`User.EnableDisableAccount.All` can set `accountEnabled` and ordinary profile
+properties, but `PATCH` of `onPremisesExtensionAttributes` is rejected with
+`403`. The only other permission that allows it, `Directory.ReadWrite.All`,
+cannot delete users but can write almost anything else in the directory, and
+Microsoft advises against directory permissions. So the Mark identity holds
+`User.ReadWrite.All`, which also allows `DELETE /users`, and "Mark never
+deletes" is a property of the workflow definition. Treat write access to the
+Logic Apps (Logic App Contributor, Contributor, Owner on the resource group) as
+equivalent to the right to delete guests.
+
+What the split does buy: the Delete identity no longer holds `AuditLog.Read.All`.
+Installations from v1 or an earlier v2 build carry roles beyond these lists; the
+deploy scripts warn about them and remove them with
+`./infra/deploy.sh --resource-group RG --skip-infra --prune-roles`.
 
 Sources: [Update user - permissions](https://learn.microsoft.com/graph/api/user-update?view=graph-rest-1.0#permissions) ·
-[Delete user - permissions](https://learn.microsoft.com/graph/api/user-delete?view=graph-rest-1.0#permissions)
-
-Installed v2.0 before this split? Both identities then still hold
-`User.ReadWrite.All` (and Delete holds `AuditLog.Read.All`). The deploy scripts
-warn about it; remove the extras with
-`./infra/deploy.sh --resource-group RG --skip-infra --prune-roles`.
+[Delete user - permissions](https://learn.microsoft.com/graph/api/user-delete?view=graph-rest-1.0#permissions) ·
+[Directory.ReadWrite.All](https://learn.microsoft.com/graph/permissions-reference#directoryreadwriteall)
 
 ### 🚫 How exclusion actually works
 
@@ -653,7 +661,17 @@ Per-reason fields in `affectedUsers[]`:
 | `expiry` | `accessExpiredOn` (the raw `extensionAttribute13` value), `daysSinceExpiry` |
 
 Common to all: `userId`, `displayName`, `userPrincipalName`, `mail`, `reason`,
-`reasonCode`, `actionTaken` (`REPORT ONLY` or `DISABLED`), `timestamp`.
+`reasonCode`, `actionTaken`, `timestamp`.
+
+`actionTaken` is the outcome for that guest, reconciled with `errors[]` and
+`throttledUnprocessed[]` before the report is written:
+
+| `actionTaken` | Meaning |
+| --- | --- |
+| `REPORT ONLY` | `ReportOnly = true`; nothing was changed |
+| `DISABLED` | Disabled and tagged |
+| `DISABLE FAILED` | The `PATCH` failed with a non-retryable error; details in `errors[]` (a `403` means a missing Graph app role) |
+| `DISABLE THROTTLED` | Still throttled after 5 attempts; not disabled this run, see `throttledUnprocessed[]` |
 
 ### Delete app - `Generate_Final_Report`
 
@@ -715,7 +733,9 @@ identical (`extensionAttribute14 = "MarkedEligibleforRemoval"`).
 ```
 
 `throttledUnprocessed[]` and `errors[]` carry the same shape as in the Mark
-report, with `phase` values `read-guest-attributes` and `delete-guest`. Note that
+report, with `phase` values `read-guest-attributes` and `delete-guest`.
+`deletedUsers[].actionTaken` is `REPORT ONLY`, `DELETED`, `DELETE FAILED` (see
+`errors[]`) or `DELETE THROTTLED` (see `throttledUnprocessed[]`). Note that
 `failedDeletes[]` predates the throttling fix and is now effectively unreachable:
 per-item `4xx`/`5xx` are routed to `errors[]` and `throttledUnprocessed[]` before
 the delete counter sees them.
@@ -806,7 +826,7 @@ Short version:
 - Redeploying with `infra/deploy.sh` **updates your existing Logic Apps in place.** The managed identity object IDs are preserved, so the Graph app roles you already granted stay valid, and run history is kept.
 - Everything previously hardcoded in the workflow JSON is now a deployment parameter. The one rename is `Threshold` to `InactivityThresholdDays`.
 - `ReportOnly` is reset to `true` on redeploy unless you pass `--report-only false`. That is deliberate: validate the new marking conditions before letting them act.
-- The Graph app roles are now separate per identity. Your existing identities keep the v1 roles (including `User.ReadWrite.All` on Mark) until you run `./infra/deploy.sh --resource-group RG --skip-infra --prune-roles`.
+- The Graph app roles are now listed per identity. Your existing identities keep the extra v1 roles (`User.EnableDisableAccount.All` on Mark, `User.DeleteRestore.All` on Delete) until you run `./infra/deploy.sh --resource-group RG --skip-infra --prune-roles`.
 - ⚠️ **v1 misclassified every successful disable as an error.** Graph returns `204` for `PATCH /users/{id}` and v1 checked for `200`, so v1 runs with `ReportOnly = false` reported `accountsDisabled: 0`, terminated as Failed with an empty error message, produced no report, and stopped after the first batch. **Accounts were still disabled correctly** - only the classification was wrong. Details and what to do about your v1 history are in the migration note.
 - ⚠️ **Because v1 stopped after the first batch, you probably have a backlog.** The first v2 run processes **the entire backlog in one execution**, so the totals will likely be many times your familiar weekly numbers. That is the v1 bug being corrected, not a v2 error. Run with `ReportOnly = true`, review the totals, and only then enable enforcement. Adjusting `DeletionThresholdDays` is **not** the lever; reviewing the report is.
 

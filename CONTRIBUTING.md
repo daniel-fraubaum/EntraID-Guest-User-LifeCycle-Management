@@ -112,7 +112,7 @@ and both parts had to fit without adding a level:
 ```
 
 Other limits worth knowing, both with plenty of headroom today: **500 actions per
-workflow** (currently 144 and 117) and an **8,192 character limit per expression**.
+workflow** (currently 147 and 120) and an **8,192 character limit per expression**.
 
 **The validator enforces all of this.** Run it after any change to a workflow
 definition; it exits non-zero on a violation:

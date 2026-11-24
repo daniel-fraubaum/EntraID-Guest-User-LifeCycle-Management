@@ -62,13 +62,15 @@ param(
     [ValidateSet('mark', 'delete', 'both')]
     [string] $Workflow = 'both',
 
-    # Least-privilege Graph app roles, per managed identity.
-    # Mark reads signInActivity (AuditLog.Read.All + User.Read.All), enumerates
-    # the source group (GroupMember.Read.All), writes extensionAttribute14/15
-    # (User.ReadUpdate.All) and sets accountEnabled = false
-    # (User.EnableDisableAccount.All). None of these allows DELETE /users.
-    [string[]] $MarkRoles = @('AuditLog.Read.All', 'GroupMember.Read.All', 'User.Read.All',
-                              'User.ReadUpdate.All', 'User.EnableDisableAccount.All'),
+    # Graph app roles, per managed identity.
+    # Mark reads signInActivity (AuditLog.Read.All), enumerates the source group
+    # (GroupMember.Read.All), and writes extensionAttribute14/15 plus
+    # accountEnabled (User.ReadWrite.All). Writing onPremisesExtensionAttributes
+    # is rejected with 403 under User.ReadUpdate.All (verified live), and the
+    # only other option, Directory.ReadWrite.All, is broader. User.ReadWrite.All
+    # also allows DELETE /users, so "Mark never deletes" rests on the workflow
+    # definition: restrict who can edit the Logic App.
+    [string[]] $MarkRoles = @('AuditLog.Read.All', 'GroupMember.Read.All', 'User.ReadWrite.All'),
 
     # Delete enumerates the source group and deletes users, for which
     # User.ReadWrite.All is the only application permission. It never reads
@@ -79,7 +81,7 @@ param(
     [string[]] $Roles,
 
     # Remove Graph app roles an identity holds beyond its list, e.g.
-    # User.ReadWrite.All on Mark after a v2.0 install.
+    # AuditLog.Read.All on Delete after a v2.0 install.
     [switch] $PruneRoles,
 
     # Enable both workflows after the role assignment. Done automatically on a
@@ -376,7 +378,7 @@ function Set-RolesForIdentity {
         }
     }
 
-    # Roles held beyond the list, e.g. User.ReadWrite.All on Mark from v2.0.
+    # Roles held beyond the list, e.g. AuditLog.Read.All on Delete from v2.0.
     foreach ($assignment in $existing) {
         if ($wantedIds -contains $assignment.appRoleId) { continue }
         $assignedName = if ($RoleNameById.ContainsKey($assignment.appRoleId)) { $RoleNameById[$assignment.appRoleId] } else { $assignment.appRoleId }
