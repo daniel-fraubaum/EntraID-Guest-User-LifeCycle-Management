@@ -168,6 +168,6 @@ Restore-MgDirectoryDeletedItem -DirectoryObjectId "<user-object-id>"
 
 ### Extension attributes are not being written
 
-1. Verify `User.ReadUpdate.All` and `User.EnableDisableAccount.All` are granted to Logic App 1's Managed Identity.
+1. Verify `User.ReadWrite.All` is granted to Logic App 1's Managed Identity. `User.ReadUpdate.All` is not enough to write `onPremisesExtensionAttributes`.
 2. Check that `ReportOnly` is set to `false` - in report-only mode, no attributes are written.
 3. Inspect the Logic App run details for the `Execute_DisableBatch` action to see if it succeeded.

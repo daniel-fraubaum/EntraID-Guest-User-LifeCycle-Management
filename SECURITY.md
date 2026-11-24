@@ -26,7 +26,7 @@ This solution manages Entra ID guest user accounts with elevated privileges. The
 
 - **Managed Identity only** - Both Logic Apps authenticate to Microsoft Graph using System-assigned Managed Identities. No client secrets, certificates, or tokens are stored.
 - **Least-privilege Graph permissions** - Each Logic App requests only the minimum Microsoft Graph app roles required:
-  - Mark Logic App: `AuditLog.Read.All`, `User.Read.All`, `GroupMember.Read.All`, `User.ReadUpdate.All`, `User.EnableDisableAccount.All` - none of which allows deleting users
+  - Mark Logic App: `AuditLog.Read.All`, `GroupMember.Read.All`, `User.ReadWrite.All` - needed to write the extension attributes; it also allows deleting users, so protect write access to the Logic App
   - Delete Logic App: `GroupMember.Read.All`, `User.ReadWrite.All` (the only application permission for `DELETE /users/{id}`)
   - See [docs/PERMISSIONS-REFERENCE.md](docs/PERMISSIONS-REFERENCE.md)
 - **No shared credentials** - Each Logic App has its own Managed Identity with independently scoped permissions.

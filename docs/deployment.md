@@ -42,22 +42,25 @@ on Microsoft Graph. `deploy.sh` / `deploy.ps1` assign them.
 | App role | Mark | Delete | Why it is needed |
 | --- | :---: | :---: | --- |
 | `AuditLog.Read.All` | ✅ | | Gates the `signInActivity` property. Without it, Graph omits it and the solution cannot detect inactivity |
-| `User.Read.All` | ✅ | | Read users; together with `AuditLog.Read.All` for `signInActivity` |
 | `GroupMember.Read.All` | ✅ | ✅ | Enumerate `/groups/{id}/members` to get the users to evaluate |
-| `User.ReadUpdate.All` | ✅ | | `PATCH /users/{id}` for `extensionAttribute14` / `15`. Does not allow `DELETE` |
-| `User.EnableDisableAccount.All` | ✅ | | Set `accountEnabled = false` |
-| `User.ReadWrite.All` | | ✅ | `DELETE /users/{id}`. It is the only application permission for that call |
+| `User.ReadWrite.All` | ✅ | ✅ | Mark: `PATCH /users/{id}` for `accountEnabled` and `extensionAttribute14` / `15`. Delete: read the attributes and `DELETE /users/{id}`, for which it is the only application permission |
 
-Because the Mark identity never holds `User.ReadWrite.All`, it cannot delete a
-user even if its workflow were changed to try. Sources:
+**The Mark identity could technically delete users.** Writing
+`onPremisesExtensionAttributes` needs `User.ReadWrite.All`: under
+`User.ReadUpdate.All` the `PATCH` is rejected with `403` (verified against a live
+tenant), and the only alternative, `Directory.ReadWrite.All`, is broader
+everywhere except user deletion. Since `User.ReadWrite.All` also allows
+`DELETE /users`, the rule that Mark never deletes is enforced by its workflow
+definition. Restrict who can edit the Logic Apps accordingly. Sources:
 [Update user](https://learn.microsoft.com/graph/api/user-update?view=graph-rest-1.0#permissions),
 [Delete user](https://learn.microsoft.com/graph/api/user-delete?view=graph-rest-1.0#permissions).
 
 Override the lists with `--mark-roles` / `--delete-roles` (`-MarkRoles` /
 `-DeleteRoles`), or `--roles` / `-Roles` for one list on both. Roles an identity
 holds beyond its list are reported as a warning; `--prune-roles` / `-PruneRoles`
-removes them. Run that once on installations from before the split, where both
-identities hold `User.ReadWrite.All`.
+removes them. Run that once on older installations, e.g. to drop
+`AuditLog.Read.All` from the Delete identity or the v1 roles
+`User.EnableDisableAccount.All` / `User.DeleteRestore.All`.
 
 ### Tooling and rights
 
